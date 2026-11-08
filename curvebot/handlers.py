@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -13,6 +15,14 @@ from .pump_curve import tokens_out_for_sol
 router = Router()
 
 PENDING_REFUNDS: dict[int, dict] = {}
+_REFUND_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _refund_lock(user_id: int) -> asyncio.Lock:
+    lock = _REFUND_LOCKS.get(user_id)
+    if lock is None:
+        lock = _REFUND_LOCKS[user_id] = asyncio.Lock()
+    return lock
 
 
 def _guard(cfg, user_id: int) -> bool:
@@ -251,6 +261,7 @@ async def cb_refund_amt(call: CallbackQuery, cfg, conn):
     except ValueError as e:
         await call.answer(str(e), show_alert=True)
         return
+    quote["fraction"] = pct / 100.0
     PENDING_REFUNDS[call.from_user.id] = quote
     await _edit(call, (
         f"↩️ <b>Conferma rimborso</b>\n\n"
@@ -270,30 +281,40 @@ async def cb_refund_amt(call: CallbackQuery, cfg, conn):
 async def cb_refund_go(call: CallbackQuery, cfg, conn, chain):
     if not _guard(cfg, call.from_user.id):
         return await call.answer()
-    quote = PENDING_REFUNDS.pop(call.from_user.id, None)
-    if quote is None:
+    pending = PENDING_REFUNDS.pop(call.from_user.id, None)
+    if pending is None:
         await call.answer("Quotazione scaduta, ripeti.", show_alert=True)
         return
-    if db.get_meta(conn, "state") == "launched":
-        await call.answer("Presale già lanciato.", show_alert=True)
-        return
-    wallet = db.get_wallet(conn, call.from_user.id)
-    if not wallet:
-        await _edit(call, "Registra prima il wallet: /setwallet <pubkey>",
-                    back_to_menu())
-        return
-    treasury = await chain.balance_sol()
-    if treasury < quote["net_sol"]:
-        await _edit(call, "😕 Treasury SOL insufficiente, riprova più tardi.",
-                    back_to_menu())
-        return
-    try:
-        sig = await chain.send_sol(wallet, quote["net_sol"])
-    except Exception:
-        await _edit(call, "❌ Invio SOL fallito, riprova.", back_to_menu())
-        return
-    service.confirm_refund(conn, call.from_user.id, quote["refund_sol"],
-                           quote["fee_sol"], signature=sig)
+    # One refund at a time per user, and the amount is RE-QUOTED against the
+    # ledger inside the lock: a quote computed before a concurrent refund was
+    # recorded can never be paid out.
+    async with _refund_lock(call.from_user.id):
+        if db.get_meta(conn, "state") == "launched":
+            await call.answer("Presale già lanciato.", show_alert=True)
+            return
+        wallet = db.get_wallet(conn, call.from_user.id)
+        if not wallet:
+            await _edit(call, "Registra prima il wallet: /setwallet <pubkey>",
+                        back_to_menu())
+            return
+        try:
+            quote = service.refund_quote(conn, call.from_user.id,
+                                         pending["fraction"], cfg.refund_fee_bps)
+        except ValueError as e:
+            await call.answer(str(e), show_alert=True)
+            return
+        treasury = await chain.balance_sol()
+        if treasury < quote["net_sol"]:
+            await _edit(call, "😕 Treasury SOL insufficiente, riprova più tardi.",
+                        back_to_menu())
+            return
+        try:
+            sig = await chain.send_sol(wallet, quote["net_sol"])
+        except Exception:
+            await _edit(call, "❌ Invio SOL fallito, riprova.", back_to_menu())
+            return
+        service.confirm_refund(conn, call.from_user.id, quote["refund_sol"],
+                               quote["fee_sol"], signature=sig)
     await _edit(call, (
         f"✅ <b>Rimborso completato</b>\n\n"
         f"💸 Inviati: <b>{quote['net_sol']:.6f} SOL</b> → <code>{wallet[:6]}…{wallet[-4:]}</code>\n"

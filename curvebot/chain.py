@@ -53,7 +53,9 @@ class Chain:
         for s in sigs.value:
             if s.err:
                 continue
-            tx = await self.client.get_transaction(s.signature)
+            tx = await self.client.get_transaction(
+                s.signature, encoding="base64",
+                max_supported_transaction_version=0)
             if tx.value is None:
                 continue
             transfer = self._find_incoming_transfer(tx.value)
@@ -67,15 +69,28 @@ class Chain:
         return out
 
     def _find_incoming_transfer(self, tx_value) -> dict | None:
+        """`tx_value` is the RPC `value` (EncodedConfirmedTransactionWithStatusMeta):
+        the message lives at value.transaction.transaction.message. Works for
+        base64 (VersionedTransaction) and json (UiTransaction) encodings.
+        Only top-level System Program transfers to the treasury count."""
+        import base58
         from solders.pubkey import Pubkey
 
+        system_program = Pubkey.from_string("11111111111111111111111111111111")
         try:
-            keys = tx_value.transaction.message.account_keys
+            inner = tx_value.transaction
+            tx = getattr(inner, "transaction", inner)
+            message = tx.message
+            keys = [k if isinstance(k, Pubkey) else Pubkey.from_string(str(k))
+                    for k in message.account_keys]
             me = self.keypair.pubkey()
-            for instr in tx_value.transaction.message.instructions:
-                data = bytes(instr.data)
+            for instr in message.instructions:
+                if keys[instr.program_id_index] != system_program:
+                    continue
+                data = instr.data
+                data = base58.b58decode(data) if isinstance(data, str) else bytes(data)
                 # System program Transfer: instruction id 2 (little-endian u32)
-                if len(data) < 12 or data[:4] != b"\x02\x00\x00\x00":
+                if len(data) != 12 or data[:4] != b"\x02\x00\x00\x00":
                     continue
                 lamports = int.from_bytes(data[4:12], "little")
                 if lamports <= 0:

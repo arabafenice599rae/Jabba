@@ -40,17 +40,22 @@ CREATE TABLE IF NOT EXISTS processed_sigs (
 
 
 def open_conn(db_path: str) -> sqlite3.Connection:
-    """Persistent connection for long-running tasks (handlers)."""
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    """Persistent connection for long-running tasks (handlers).
+
+    Autocommit (isolation_level=None): every write is durable immediately,
+    visible to the monitor's connection, and never holds the write lock
+    between handler calls."""
+    conn = sqlite3.connect(db_path, check_same_thread=False,
+                           isolation_level=None, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
-    conn.commit()
     return conn
 
 
 @contextmanager
 def connect(db_path: str):
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(SCHEMA)
