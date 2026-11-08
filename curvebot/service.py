@@ -1,59 +1,54 @@
-"""Off-chain token ledger operations on top of the curve, with buy/sell fees."""
+"""Presale ledger operations: SOL deposits, refunds, contribution shares.
+
+No bonding curve of our own: the price is decided by the pump.fun curve
+at launch (dev buy at the bottom). The presale only tracks who gave how
+much SOL; tokens are distributed proportionally to SOL contributed.
+"""
 
 from __future__ import annotations
 
 from . import db
-from .curve import LinearCurve
 
 
-def buy(conn, curve: LinearCurve, telegram_id: int, amount_sol: float,
-        buy_fee_bps: int, signature: str | None = None) -> dict:
-    """Credit tokens for a SOL deposit. The buy fee is withheld first and
-    stays in the treasury; only the net amount buys on the curve.
-
-    Returns dict with fee_sol, net_sol, tokens.
-    """
-    fee_sol = amount_sol * buy_fee_bps / 10_000.0
-    net_sol = amount_sol - fee_sol
-    supply = db.get_state(conn)["supply_tokens"]
-    tokens = curve.tokens_out_for_sol(net_sol, supply)
-    if tokens <= 0:
-        return {"fee_sol": 0.0, "net_sol": 0.0, "tokens": 0.0}
-    db.record(conn, telegram_id, "buy", amount_sol, tokens, fee_sol=fee_sol,
+def record_deposit(conn, telegram_id: int, amount_sol: float,
+                   signature: str | None = None) -> None:
+    db.record(conn, telegram_id, "deposit", amount_sol, 0.0,
               signature=signature)
-    return {"fee_sol": fee_sol, "net_sol": net_sol, "tokens": tokens}
 
 
-def sell(conn, curve: LinearCurve, telegram_id: int, tokens: float,
-         sell_fee_bps: int) -> dict:
-    """Debit tokens and compute the SOL refund. Does NOT move SOL on-chain:
-    the caller sends `net_sol` to the user's wallet, then persists the record.
-
-    Returns dict with gross_sol, fee_sol, net_sol, tokens, position_after,
-    or raises ValueError if the user cannot sell that many tokens.
-    """
-    position = db.user_position(conn, telegram_id)
-    if tokens <= 0:
-        raise ValueError("importo non valido")
-    if tokens > position:
-        raise ValueError(f"saldo insufficiente: {position:,.4f} token")
-
-    supply = db.get_state(conn)["supply_tokens"]
-    gross, net = curve.sell_proceeds_sol(tokens, supply, sell_fee_bps)
-    fee = gross - net
+def refund_quote(conn, telegram_id: int, fraction: float,
+                 refund_fee_bps: int) -> dict:
+    """Quote a partial/full refund. fraction in [0,1]. Returns dict with
+    contribution_after, refund_sol, fee_sol, net_sol. Raises ValueError."""
+    contribution = db.user_contribution(conn, telegram_id)
+    refund_sol = contribution * fraction
+    if refund_sol <= 0:
+        raise ValueError("nessun contributo da rimborsare")
+    fee = refund_sol * refund_fee_bps / 10_000.0
+    net = refund_sol - fee
     if net <= 0:
         raise ValueError("importo troppo piccolo")
-
     return {
-        "tokens": tokens,
-        "gross_sol": gross,
+        "refund_sol": refund_sol,
         "fee_sol": fee,
         "net_sol": net,
-        "position_after": position - tokens,
+        "contribution_after": contribution - refund_sol,
     }
 
 
-def confirm_sell(conn, telegram_id: int, tokens: float, gross_sol: float,
-                 fee_sol: float, signature: str | None = None) -> None:
-    db.record(conn, telegram_id, "sell", gross_sol, tokens, fee_sol=fee_sol,
+def confirm_refund(conn, telegram_id: int, refund_sol: float,
+                   fee_sol: float, signature: str | None = None) -> None:
+    db.record(conn, telegram_id, "refund", refund_sol, fee_sol,
               signature=signature)
+
+
+def shares(conn) -> dict[int, float]:
+    """SOL contribution per user (net of refunds)."""
+    return {
+        row["telegram_id"]: db.user_contribution(conn, row["telegram_id"])
+        for row in conn.execute("SELECT DISTINCT telegram_id FROM ledger")
+    }
+
+
+def total_raised(conn) -> float:
+    return db.total_raised(conn)

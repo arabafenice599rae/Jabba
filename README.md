@@ -1,30 +1,58 @@
-# solana-curve-bot
+# Jabba — Presale Bot + Atomic Launch su pump.fun
 
-Bot Telegram minimale che gestisce una bonding curve lineare, **tutto off-chain**:
-esiste un solo indirizzo Solana (il treasury) dove arrivano i SOL; il "token"
-è un credito nel database del bot, non un asset on-chain.
+Bot Telegram che gestisce un **presale flat** (contributi in SOL, quota
+proporzionale) e lancia il token su pump.fun con un **bundle atomico Jito**:
+creazione + dev buy + distribuzione ai wallet nello stesso slot.
 
 ## Come funziona
 
-- Un solo keypair: l'**indirizzo treasury** (visibile on-chain) dove si accumulano i SOL.
-- Curva lineare: `prezzo(supply) = P0 + M * supply`.
-- **Buy**: l'utente registra il wallet con `/setwallet`, poi invia SOL al
-  treasury. Il monitor rileva il deposito, trattiene la **fee buy (0,30%)**,
-  calcola i token sul netto secondo la curva e accredita il saldo nel ledger.
-- **Sell**: `/sell <importo|%>` — il bot verifica il saldo, sottrae la
-  **fee sell (0,30%)** dai proventi, invia i SOL al wallet dell'utente e
-  azzera i token nel ledger. Le fee restano nel treasury come ricavo.
-- Nessun token SPL: nessun mint, burn, ATA. Solo SOL in ingresso, SOL in uscita.
-- Idempotenza: ogni deposito è processato una sola volta (dedup firme tx).
-- Whitelist rigida `ALLOWED_TELEGRAM_IDS`: chiunque altro viene ignorato.
+```
+FASE 1 — PRESALE (custodiale)
+   /setwallet → deposito SOL al treasury → ledger dei contributi
+   Rimborsi liberi (fee 0,30%) fino al lancio
 
-## Attenzione
+FASE 2 — LAUNCH ATOMICO (zero-custodia)
+   /launch → 10% SOL al team (TEAM_KEEP_PERCENT)
+           → 90% → bundle Jito: create+devbuy (1 tx) + distribuzione
+             → 100% dei token agli utenti, ∝ SOL versati, stesso slot
 
-- Il saldo token esiste **solo nel DB del bot**: non è visibile in Phantom,
-  non è trasferibile fuori dal bot, e un errore nel DB può perderlo.
-- Il treasury è **custodiale**: i SOL degli utenti stanno nel wallet del bot.
-  Gestisci la chiave privata come una chiave di produzione, e valuta gli
-  aspetti legali/regolamentari prima di andare live.
+FASE 3 — MERCATO (automatico)
+   Curva pump.fun → graduazione ~$69k → pool PumpSwap → Jupiter
+```
+
+- **Presale flat**: nessuna curva nostra, nessun token off-chain — il
+  prezzo lo decide la curva pump.fun al dev buy (bottom, deterministico)
+- **Rimborso libero**: `/refund` 25/50/75/100% con fee `REFUND_FEE_BPS`
+  (default 0,30%), chiuso dopo il lancio
+- **Quota**: `/position` mostra SOL contribuiti, % del totale e token
+  stimati al lancio (matematica pump.fun deterministica)
+- **Lancio atomico**: create + dev buy in **una** transazione (PumpPortal
+  `trade-local`), poi la distribuzione in chunk — tutto in un bundle
+  Jito: o tutto riesce, o tutto torna indietro
+- **Zero token al team**: `TEAM_SHARE_BPS=0`; il team trattiene solo il
+  10% dei SOL (`TEAM_KEEP_PERCENT`)
+
+## Sicurezza e garanzie
+
+- **Custodia — distinzione fondamentale**: il presale è **custodiale**
+  (l'operatore tiene i SOL durante la raccolta); solo il lancio è
+  zero-custodia (l'atomicità elimina gli stati intermedi di
+  distribuzione, non la custodia della raccolta). Comunicalo agli utenti.
+- **Verifica on-chain a runtime**: prima di lanciare, il bot legge
+  l'account global del programma pump.fun e confronta i parametri della
+  curva (VTR/VSR/RTR/supply/fee); se non matchano, il lancio abortisce
+- **Preflight economico dinamico**: `dev_buy + rent_ATA×N + fee_rete +
+  priority_fee + tip` calcolato prima di firmare; rent per 36 utenti
+  ≈ 0.073 SOL; se il treasury non copre tutto, rifiuto esplicito
+- **Esiti bundle mai ambigui**: `getInflightBundleStatuses` fino a
+  Landed/Failed, poi `getBundleStatuses` per la conferma; timeout =
+  esito sconosciuto → riconciliazione manuale su Solscan, **mai retry
+  automatico** (rischio doppio lancio)
+- **Limite atomico rigido**: massimo **36 partecipanti** (chunk da 9
+  misurati sui 1232 byte/tx, 5 tx per bundle); oltre, il lancio è
+  rifiutato — più bundle NON sono atomici tra loro
+- Whitelist rigida `ALLOWED_TELEGRAM_IDS` (admin = primo ID), chiave
+  privata solo da file, idempotenza depositi via dedup firme
 
 ## Setup
 
@@ -36,7 +64,9 @@ solana-keygen new -o treasury.json  # indirizzo treasury
 python -m curvebot.main
 ```
 
-Su devnet: `solana airdrop 2` per finanziare il treasury di test.
+Per il lancio servono anche: `PINATA_JWT` (metadati IPFS),
+`TOKEN_NAME`/`TOKEN_SYMBOL`/`TOKEN_IMAGE_PATH`, e un RPC mainnet
+(Helius/QuickNode).
 
 ## Test
 
@@ -44,58 +74,47 @@ Su devnet: `solana airdrop 2` per finanziare il treasury di test.
 pytest tests/ -q
 ```
 
-22 test: matematica della curva, fee buy/sell, ledger SQLite e servizio
-buy/sell off-chain (incluso roundtrip: chi compra e rivende subito recupera
-il deposito al netto delle due fee).
+52 test: presale (contributi, rimborsi, shares), invariante distribuzione
+in base-unit interi (Σ quote + team + dust == distribuito, per
+1/15/30/36 utenti), chunking (rifiuto per 37/45/46/100), parametri curva
+pump.fun verificati on-chain, macchina a stati Jito (inflight + conferme,
+casi malformati), preflight costi (rent ATA), costruzione/firma tx
+offline, UI.
+
+**Non coperto** (mainnet-only): atterraggio reale del bundle e
+comportamento PumpPortal in produzione → primo lancio in piccolo
+(0.1 SOL di dev buy).
 
 ## Struttura
 
 ```
 curvebot/
-  curve.py     matematica della curva lineare
-  service.py   operazioni ledger buy/sell (testabili offline)
-  db.py        SQLite: utenti/wallet, ledger, supply, dedup firme
-  chain.py     Solana minima: balance, invio SOL, parsing depositi
-  monitor.py   watcher depositi in background
-  handlers.py  comandi Telegram (aiogram 3)
-  config.py    configurazione da env
-  main.py      entry point
-tests/         test curve + db + service
+  service.py    ledger presale: depositi, rimborsi con fee, shares
+  db.py         SQLite: users, ledger(deposit/refund), launches, meta,
+                processed_sigs (idempotenza)
+  chain.py      Solana: treasury, depositi, firma tx PumpPortal,
+                build_distribution_tx (ATA idempotenti + transfer_checked
+                + tip Jito), send_bundle, tip accounts
+  monitor.py    polling RPC depositi → accredito contributi
+  pump_curve.py matematica curva pump.fun (parametri VERIFICATI on-chain)
+  launch.py     PumpPortal client, distribuzione (invariante), chunking,
+                preflight costi, macchina a stati bundle
+  keyboards.py  layout bottoni inline
+  handlers.py   comandi + callback (rimborso guidato, /launch admin)
+  chart.py      PNG curva pump.fun attesa (dev buy marcato)
+  config.py     configurazione da env
+  main.py       entry point
+tests/          52 test
+SPEC.md         specifica tecnica completa
 ```
 
 ## Interfaccia
 
-`/start` apre il menu con bottoni inline:
-
-- 💰 Come comprare · 📤 Vendi
-- 📊 Posizione · 📈 Curva
-- ℹ️ Info
-
-La vendita è guidata: scelta percentuale (25/50/75/100%) →
-quotazione con fee → conferma con due bottoni (✅/❌).
-`/chart` (o il bottone 📈) invia il grafico PNG della curva con il
-supply attuale segnato.
-
-## Mini App (simulatore interattivo)
-
-`miniapp/index.html` è una Telegram Mini App self-contained (nessun backend,
-nessun build): grafico della curva esplorabile al tocco + simulatore
-buy/sell con fee in tempo reale.
-
-### Hosting (GitHub Pages)
-
-1. Fork/clona il repo e attiva Pages: **Settings → Pages → Deploy from a
-   branch → main → / (root)** oppure metti `miniapp/` in una cartella
-   `docs/` e seleziona quella.
-2. L'URL sarà tipo `https://<utente>.github.io/jabba/miniapp/`
-   (o `/jabba/` se pubblichi la root).
-3. Inseriscilo in `WEBAPP_URL` nel `.env` del bot: apparirà il bottone
-   **🧮 Simulatore** nel menu, che apre la Mini App dentro Telegram.
-4. Opzionale: da BotFather, `/setmenubutton` per avere la Mini App anche
-   nel menu del bot.
-
-La app riceve i parametri della curva (P0, slope, supply, fee) via query
-string quando il bot la apre: i dati sono sempre quelli attuali.
+`/start` apre il pannello con bottoni inline (Come partecipare ·
+Rimborso · Posizione · Curva · Info). Il rimborso è guidato: scelta
+percentuale → quotazione con fee → conferma ✅/❌. `/launch` (admin)
+mostra il riepilogo (raccolto, split team/dev buy, partecipanti) con
+doppia conferma.
 
 ## Comandi
 
@@ -103,8 +122,17 @@ string quando il bot la apre: i dati sono sempre quelli attuali.
 |---|---|
 | `/start` `/menu` | pannello con bottoni inline |
 | `/setwallet <pubkey>` | registra il wallet per depositi e rimborsi |
-| `/info` | indirizzo treasury, prezzo, supply, SOL accumulati, fee buy/sell |
-| `/price` | prezzo attuale |
-| `/position` | token posseduti e valore netto se vendi ora |
-| `/chart` `/curva` | grafico PNG della curva |
-| `/sell` | apre il menu vendita a bottoni |
+| `/info` | raccolto, partecipanti, token stimati, fee, treasury |
+| `/position` | SOL contribuiti, % del presale, token stimati |
+| `/refund` | rimborso guidato con conferma (solo pre-lancio) |
+| `/launch` | (solo admin) lancio atomico su pump.fun |
+
+## Attenzione
+
+- Il presale è **custodiale**: gestisci la chiave del treasury come una
+  chiave di produzione
+- pump.fun e Jito sono **solo mainnet**: nessun devnet per collaudare
+- Gli screener (trench.bot/GMGN) marchiano il supply concentrato nel
+  wallet del dev: la distribuzione atomica immediata è la mitigazione
+- Offrire token contro SOL ha implicazioni legali/regolamentari:
+  valuta l'aspetto prima di andare live
