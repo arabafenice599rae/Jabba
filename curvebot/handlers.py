@@ -16,6 +16,7 @@ router = Router()
 
 PENDING_REFUNDS: dict[int, dict] = {}
 _REFUND_LOCKS: dict[int, asyncio.Lock] = {}
+_LAUNCH_IN_FLIGHT = asyncio.Lock()
 
 
 def _refund_lock(user_id: int) -> asyncio.Lock:
@@ -32,14 +33,16 @@ def _guard(cfg, user_id: int) -> bool:
 
 
 def _est_tokens(conn, cfg, contribution: float) -> float:
-    """Estimated tokens at launch for a contribution, given treasury size."""
+    """Proportional estimate: the dev buy is priced ONCE for the whole
+    pool, then split by contribution share. The sum of the estimates can
+    never exceed what the dev buy actually buys."""
     raised = db.total_raised(conn)
     if raised <= 0:
         return 0.0
     dev_buy = raised * (100.0 - cfg.team_keep_percent) / 100.0
     expected = tokens_out_for_sol(dev_buy)
-    user_share = tokens_out_for_sol(dev_buy * contribution / raised)
-    return user_share * (1 - cfg.team_share_bps / 10_000.0)
+    return (expected * contribution / raised
+            * (1 - cfg.team_share_bps / 10_000.0))
 
 
 def _fmt_info(cfg, conn, chain_pubkey: str, sol: float) -> str:
@@ -128,8 +131,25 @@ async def cmd_setwallet(message: Message, command: CommandObject, cfg, conn):
     if not _guard(cfg, message.from_user.id):
         return
     wallet = (command.args or "").strip()
-    if not wallet or len(wallet) < 32:
+    if not wallet:
         await message.answer("Uso: <code>/setwallet &lt;pubkey&gt;</code>")
+        return
+    try:
+        from solders.pubkey import Pubkey
+        Pubkey.from_string(wallet)
+    except Exception:
+        await message.answer("❌ Wallet non valido (non è un pubkey Solana).")
+        return
+    taken = conn.execute(
+        "SELECT telegram_id FROM users WHERE wallet = ? AND telegram_id != ?",
+        (wallet, message.from_user.id)).fetchone()
+    if taken:
+        await message.answer("❌ Wallet già registrato da un altro utente.")
+        return
+    if db.user_contribution(conn, message.from_user.id) > 0:
+        await message.answer(
+            "❌ Il wallet non può essere cambiato dopo aver contribuito: "
+            "contatta l'amministratore per una modifica verificata.")
         return
     db.set_wallet(conn, message.from_user.id, wallet)
     await message.answer(f"✅ Wallet registrato:\n<code>{wallet}</code>")
@@ -246,6 +266,27 @@ async def cb_chart(call: CallbackQuery, cfg, conn):
     await call.answer()
 
 
+@router.callback_query(F.data == "refund:open")
+async def cb_refund_open(call: CallbackQuery, cfg, conn):
+    if not _guard(cfg, call.from_user.id):
+        return await call.answer()
+    c = service.available_contribution(conn, call.from_user.id)
+    if c <= 0:
+        await _edit(call, "Nessun contributo da rimborsare.", back_to_menu())
+        return await call.answer()
+    await _edit(call,
+        f"↩️ <b>Rimborso</b>\n\nContribuito: <code>{c:.4f} SOL</code>\n"
+        f"Quanto vuoi rimborsare? (fee {cfg.refund_fee_bps / 100:.2f}%)",
+        InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="25%", callback_data="refund:amt:25"),
+             InlineKeyboardButton(text="50%", callback_data="refund:amt:50")],
+            [InlineKeyboardButton(text="75%", callback_data="refund:amt:75"),
+             InlineKeyboardButton(text="100%", callback_data="refund:amt:100")],
+            [InlineKeyboardButton(text="↩️ Indietro", callback_data="menu:back")],
+        ]))
+    await call.answer()
+
+
 @router.callback_query(F.data.startswith("refund:amt:"))
 async def cb_refund_amt(call: CallbackQuery, cfg, conn):
     if not _guard(cfg, call.from_user.id):
@@ -254,14 +295,17 @@ async def cb_refund_amt(call: CallbackQuery, cfg, conn):
         await call.answer("Presale già lanciato: rimborsi chiusi.",
                           show_alert=True)
         return
+    if db.launch_lock_held(conn) or _LAUNCH_IN_FLIGHT.locked():
+        await call.answer("Lancio in corso: rimborsi sospesi.",
+                          show_alert=True)
+        return
     pct = int(call.data.split(":")[2])
     try:
-        quote = service.refund_quote(conn, call.from_user.id, pct / 100.0,
-                                     cfg.refund_fee_bps)
+        quote = service.reserve_refund(conn, call.from_user.id, pct / 100.0,
+                                       cfg.refund_fee_bps)
     except ValueError as e:
         await call.answer(str(e), show_alert=True)
         return
-    quote["fraction"] = pct / 100.0
     PENDING_REFUNDS[call.from_user.id] = quote
     await _edit(call, (
         f"↩️ <b>Conferma rimborso</b>\n\n"
@@ -281,40 +325,45 @@ async def cb_refund_amt(call: CallbackQuery, cfg, conn):
 async def cb_refund_go(call: CallbackQuery, cfg, conn, chain):
     if not _guard(cfg, call.from_user.id):
         return await call.answer()
-    pending = PENDING_REFUNDS.pop(call.from_user.id, None)
-    if pending is None:
+    quote = PENDING_REFUNDS.pop(call.from_user.id, None)
+    if quote is None:
         await call.answer("Quotazione scaduta, ripeti.", show_alert=True)
         return
-    # One refund at a time per user, and the amount is RE-QUOTED against the
-    # ledger inside the lock: a quote computed before a concurrent refund was
-    # recorded can never be paid out.
     async with _refund_lock(call.from_user.id):
         if db.get_meta(conn, "state") == "launched":
+            service.release_refund(conn, quote["pending_id"])
             await call.answer("Presale già lanciato.", show_alert=True)
+            return
+        if db.launch_lock_held(conn) or _LAUNCH_IN_FLIGHT.locked():
+            service.release_refund(conn, quote["pending_id"])
+            await call.answer("Lancio in corso: rimborsi sospesi.",
+                              show_alert=True)
             return
         wallet = db.get_wallet(conn, call.from_user.id)
         if not wallet:
+            service.release_refund(conn, quote["pending_id"])
             await _edit(call, "Registra prima il wallet: /setwallet <pubkey>",
                         back_to_menu())
             return
-        try:
-            quote = service.refund_quote(conn, call.from_user.id,
-                                         pending["fraction"], cfg.refund_fee_bps)
-        except ValueError as e:
-            await call.answer(str(e), show_alert=True)
-            return
         treasury = await chain.balance_sol()
         if treasury < quote["net_sol"]:
+            service.release_refund(conn, quote["pending_id"])
             await _edit(call, "😕 Treasury SOL insufficiente, riprova più tardi.",
                         back_to_menu())
             return
         try:
             sig = await chain.send_sol(wallet, quote["net_sol"])
         except Exception:
-            await _edit(call, "❌ Invio SOL fallito, riprova.", back_to_menu())
+            # UNCERTAIN outcome: keep the reservation held, mark unknown —
+            # the tx may have landed despite the lost RPC response
+            service.mark_refund_unknown(conn, quote["pending_id"])
+            await _edit(call,
+                        "⚠️ Invio SOL fallito o esito incerto: il rimborso "
+                        "è in stato <b>unknown</b> e resta trattenuto. Verrà "
+                        "riconciliato col prossimo tentativo o via /reconcile.",
+                        back_to_menu())
             return
-        service.confirm_refund(conn, call.from_user.id, quote["refund_sol"],
-                               quote["fee_sol"], signature=sig)
+        service.commit_refund(conn, quote["pending_id"], signature=sig)
     await _edit(call, (
         f"✅ <b>Rimborso completato</b>\n\n"
         f"💸 Inviati: <b>{quote['net_sol']:.6f} SOL</b> → <code>{wallet[:6]}…{wallet[-4:]}</code>\n"
@@ -325,8 +374,10 @@ async def cb_refund_go(call: CallbackQuery, cfg, conn, chain):
 
 
 @router.callback_query(F.data == "refund:cancel")
-async def cb_refund_cancel(call: CallbackQuery, cfg):
-    PENDING_REFUNDS.pop(call.from_user.id, None)
+async def cb_refund_cancel(call: CallbackQuery, cfg, conn):
+    quote = PENDING_REFUNDS.pop(call.from_user.id, None)
+    if quote:
+        service.release_refund(conn, quote["pending_id"])
     await _edit(call, "❌ Rimborso annullato.", back_to_menu())
     await call.answer()
 
@@ -347,16 +398,19 @@ async def cb_launch_go(call: CallbackQuery, cfg, conn, chain):
         return await call.answer("Solo l'admin.", show_alert=True)
     if db.get_meta(conn, "state") == "launched":
         return await call.answer("Già lanciato.", show_alert=True)
-    await call.answer("Lancio in corso…")
-    import aiohttp
+    if _LAUNCH_IN_FLIGHT.locked():
+        return await call.answer("Lancio già in corso.", show_alert=True)
+    async with _LAUNCH_IN_FLIGHT:
+        await call.answer("Lancio in corso…")
+        import aiohttp
 
-    from .launch import run_launch
-    async with aiohttp.ClientSession() as http:
-        try:
-            report = await run_launch(chain, cfg, conn, http)
-        except Exception as e:
-            await call.message.answer(f"❌ Lancio fallito: {e}")
-            return
+        from .launch import run_launch
+        async with aiohttp.ClientSession() as http:
+            try:
+                report = await run_launch(chain, cfg, conn, http)
+            except Exception as e:
+                await call.message.answer(f"❌ Lancio fallito: {e}")
+                return
     await call.message.answer(
         f"🚀 <b>LANCIATO!</b>\n\n"
         f"🪙 <code>{report['mint']}</code>\n"
@@ -368,3 +422,42 @@ async def cb_launch_go(call: CallbackQuery, cfg, conn, chain):
         f"Team: {report['team_tokens']:,.0f} · Dust in treasury: {report['dust_tokens']:,.0f}\n\n"
         f"I token sono nei wallet degli utenti. La curva è ora su pump.fun."
     )
+
+
+@router.message(Command("reconcile"))
+async def cmd_reconcile(message: Message, cfg, conn, chain):
+    if not _guard(cfg, message.from_user.id):
+        return
+    if message.from_user.id != cfg.allowed_ids[0]:
+        await message.answer("Solo l'amministratore.")
+        return
+    transfers = await chain.incoming_sol_transfers(max_signatures=50)
+    onchain = {f"{t['signature']}:{t['index']}": t["amount_sol"]
+               for t in transfers}
+    result = service.reconcile(conn, onchain)
+    resolutions = await service.resolve_unknown_refunds(conn, chain)
+    lines = [
+        "🔍 <b>Riconciliazione ledger ↔ blockchain</b>",
+        "(finalized, ultime 50 tx; nessuna correzione automatica)",
+        "",
+        f"Depositi on-chain: <b>{len(onchain)}</b>",
+        f"• mancati nel ledger: <b>{len(result['missing_in_ledger'])}</b>",
+        f"• duplicati nel ledger: <b>{len(result['duplicate_ledger'])}</b>",
+        f"• importi diversi: <b>{len(result['amount_mismatch'])}</b>",
+        f"• non verificabili (fuori finestra): "
+        f"<b>{len(result['unverifiable_onchain'])}</b>",
+        f"• rimborsi unknown trattenuti: <b>{len(result['unknown_refunds'])}</b>",
+        f"• rimborsi senza firma: <b>{len(result['refund_sigs_unresolved'])}</b>",
+    ]
+    if resolutions:
+        lines.append("")
+        lines.append("Risoluzioni unknown: " + ", ".join(
+            f"#{r['id']}→{r['outcome']}" for r in resolutions))
+    clean = not any(result[k] for k in
+                    ("missing_in_ledger", "duplicate_ledger",
+                     "amount_mismatch", "unknown_refunds",
+                     "refund_sigs_unresolved"))
+    lines.append("")
+    lines.append("✅ Nessuna discrepanza." if clean else
+                 "⚠️ Discrepanze sopra: correzione SOLO manuale.")
+    await message.answer("\n".join(lines))

@@ -11,7 +11,7 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
 
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [_btn("💰 Come comprare", "menu:howbuy"), _btn("📤 Vendi", "sell:open")],
+        [_btn("💰 Come comprare", "menu:howbuy"), _btn("↩️ Rimborso", "refund:open")],
         [_btn("📊 Posizione", "menu:position"), _btn("📈 Curva", "menu:chart")],
         [_btn("ℹ️ Info", "menu:info")],
     ])

@@ -17,14 +17,12 @@ def test_chart_png_zero_dev_buy():
 def test_main_menu_layout():
     kb = main_menu()
     rows = kb.inline_keyboard
-    assert len(rows[0]) == 2          # come comprare | vendi
+    assert len(rows[0]) == 2          # come comprare | rimborso
     assert len(rows[1]) == 2          # posizione | curva
     assert len(rows[2]) == 1          # info
     datas = [b.callback_data for row in rows for b in row]
-    assert set(datas) == {"menu:howbuy", "sell:open", "menu:position",
-                          "menu:position", "menu:chart", "menu:info"} or \
-        set(datas) == {"menu:howbuy", "sell:open", "menu:position",
-                      "menu:chart", "menu:info"}
+    assert set(datas) == {"menu:howbuy", "refund:open", "menu:position",
+                          "menu:chart", "menu:info"}
 
 
 def test_back_button():

@@ -172,8 +172,6 @@ def test_safety_margin_vs_slippage(world, cfg, conn):
     assert margin < cfg.launch_slippage / 100     # margin << allowed slippage
 
 
-@finding("monitor keeps crediting deposits after launch: SOL arrive, no "
-         "tokens, refunds closed -> funds stuck")
 def test_monitor_stops_after_launch(db_path, cfg):
     with db.connect(db_path) as c:
         db.set_wallet(c, 1, "WALLET_A")
@@ -188,8 +186,6 @@ def test_monitor_stops_after_launch(db_path, cfg):
         assert db.user_contribution(c, 1) == 0
 
 
-@finding("incoming_sol_transfers reads only the last 25 signatures with no "
-         "pagination: a burst of >25 txs between polls loses deposits")
 def test_incoming_scan_paginates(cfg):
     sigs = [SimpleNamespace(signature=f"s{i}", slot=100 - i, err=None) for i in range(40)]
 
@@ -202,6 +198,6 @@ def test_incoming_scan_paginates(cfg):
     c = Chain.__new__(Chain)
     c.keypair = Keypair()
     c.client = Client()
-    c._find_incoming_transfer = lambda v: {"sender": "A", "amount_sol": 1.0}
+    c._find_incoming_transfers = lambda v: [{"sender": "A", "amount_sol": 1.0}]
     out = asyncio.run(c.incoming_sol_transfers())
     assert len(out) == 40

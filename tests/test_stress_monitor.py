@@ -72,8 +72,8 @@ def _chain(kp: Keypair) -> Chain:
 def test_parse_real_rpc_object(encoding):
     treasury, sender = Keypair(), Keypair()
     tx = _tx(sender, treasury.pubkey(), 500_000_000)
-    got = _chain(treasury)._find_incoming_transfer(_resp(tx, encoding).value)
-    assert got == {"sender": str(sender.pubkey()), "amount_sol": 0.5}
+    got = _chain(treasury)._find_incoming_transfers(_resp(tx, encoding).value)
+    assert got == [{"sender": str(sender.pubkey()), "amount_sol": 0.5}]
 
 
 def _fixed_path(resp):
@@ -84,15 +84,15 @@ def _fixed_path(resp):
 def test_parser_logic_ok_when_given_the_inner_tx():
     treasury, sender = Keypair(), Keypair()
     tx = _tx(sender, treasury.pubkey(), 250_000_000)
-    got = _chain(treasury)._find_incoming_transfer(_fixed_path(_resp(tx, "base64")))
-    assert got == {"sender": str(sender.pubkey()), "amount_sol": 0.25}
+    got = _chain(treasury)._find_incoming_transfers(_fixed_path(_resp(tx, "base64")))
+    assert got == [{"sender": str(sender.pubkey()), "amount_sol": 0.25}]
 
 
 def test_outgoing_transfer_is_not_credited():
     """A refund FROM the treasury must not be read as a deposit."""
     treasury, other = Keypair(), Keypair()
     tx = _tx(treasury, other.pubkey(), 100_000_000)
-    assert _chain(treasury)._find_incoming_transfer(_fixed_path(_resp(tx, "base64"))) is None
+    assert _chain(treasury)._find_incoming_transfers(_fixed_path(_resp(tx, "base64"))) == []
 
 
 def test_rpc_fetch_requests_base64_and_v0():
@@ -108,7 +108,9 @@ def test_rpc_fetch_requests_base64_and_v0():
     c = _chain(Keypair())
     c.client = Client()
     asyncio.run(c.incoming_sol_transfers())
-    assert seen == {"encoding": "base64", "max_supported_transaction_version": 0}
+    assert seen["encoding"] == "base64"
+    assert seen["max_supported_transaction_version"] == 0
+    assert str(seen.get("commitment", "")).lower().endswith("finalized")
 
 
 def test_only_system_program_instructions_count():
@@ -120,7 +122,7 @@ def test_only_system_program_instructions_count():
                      [AccountMeta(sender.pubkey(), True, True),
                       AccountMeta(treasury.pubkey(), False, True)])
     tx = Transaction.new_signed_with_payer([ix], sender.pubkey(), [sender], Hash.default())
-    assert _chain(treasury)._find_incoming_transfer(_resp(tx, "base64").value) is None
+    assert _chain(treasury)._find_incoming_transfers(_resp(tx, "base64").value) == []
 
 
 # ---------------- monitor loop: window + idempotency ----------------
@@ -149,7 +151,7 @@ def test_monitor_credits_known_wallet(db_path, cfg):
     _run_monitor(db_path, cfg, t, {1: "WALLET_A"})
     with db.connect(db_path) as c:
         assert db.user_contribution(c, 1) == pytest.approx(1.0)
-        assert db.sig_seen(c, "s1")
+        assert db.sig_seen(c, "s1:0")
 
 
 def test_monitor_ignores_unknown_and_below_min(db_path, cfg):
@@ -159,7 +161,7 @@ def test_monitor_ignores_unknown_and_below_min(db_path, cfg):
     with db.connect(db_path) as c:
         assert db.user_contribution(c, 1) == 0
         # below-min sig is still consumed (won't be retried), unknown too
-        assert db.sig_seen(c, "s1") and db.sig_seen(c, "s2")
+        assert db.sig_seen(c, "s1:0") and db.sig_seen(c, "s2:0")
 
 
 def test_monitor_idempotent_across_polls(db_path, cfg):
@@ -172,9 +174,6 @@ def test_monitor_idempotent_across_polls(db_path, cfg):
         assert db.user_contribution(c, 1) == pytest.approx(2.0)   # not doubled
 
 
-@finding("a deposit skipped once (get_transaction returned None: RPC not yet "
-         "indexed) reappears BELOW last_signature on the next poll, and the "
-         "early break means it is never processed -> deposit lost")
 def test_monitor_window_break_does_not_skip_older_new_sig(db_path, cfg):
     # newest-first history; s_new is unseen (index 0), s_old already seen.
     # last_signature points at s_old -> loop breaks on reaching it, which is
@@ -185,7 +184,7 @@ def test_monitor_window_break_does_not_skip_older_new_sig(db_path, cfg):
          {"signature": "s_late", "slot": 1, "sender": "WALLET_A", "amount_sol": 1.0}]
     with db.connect(db_path) as c:
         db.set_wallet(c, 1, "WALLET_A")
-        db.mark_sig(c, "s_seen")
+        db.mark_sig(c, "s_seen:0")
     mon = DepositMonitor(FakeChainRPC(t), cfg, lambda: db.connect(db_path))
     mon.last_signature = "s_seen"
     asyncio.run(mon._poll_sol_deposits())

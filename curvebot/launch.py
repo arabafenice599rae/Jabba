@@ -248,8 +248,22 @@ async def wait_bundle(http: aiohttp.ClientSession, bundle_id: str,
 
 
 async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
-    """Atomic launch. Raises on any precondition failure; the ledger state
-    is only committed to 'launched' after the bundle is confirmed landed."""
+    """Atomic launch. A persistent launch lock (meta table, atomic
+    check-and-set) prevents two launches: released on DEFINITIVE failure,
+    kept on UNKNOWN bundle outcomes (manual resolution required)."""
+    if not db.acquire_launch_lock(conn):
+        raise RuntimeError("lancio già in corso (lock attivo)")
+    try:
+        report = await _run_launch_locked(chain, cfg, conn, http)
+    except Exception as e:
+        if "SCONOSCIUTO" not in str(e):
+            db.release_launch_lock(conn)
+        raise
+    return report
+
+
+async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
+    """Inner launch body; the caller holds the launch lock."""
     global_raw = await fetch_global_account(chain)
     onchain = verify_params(global_raw)
     if not params_match(onchain):

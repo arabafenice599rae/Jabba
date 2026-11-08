@@ -44,39 +44,119 @@ class Chain:
         return str(resp.value)
 
     async def incoming_sol_transfers(self, max_signatures: int = 25) -> list[dict]:
-        """SOL transfers TO the treasury address. Returns dicts with
-        signature, slot, sender, amount_sol."""
-        sigs = await self.client.get_signatures_for_address(
-            self.keypair.pubkey(), limit=max_signatures
-        )
+        """FINALIZED SOL transfers TO the treasury. One entry per
+        incoming transfer: dicts with signature, index, slot, sender,
+        amount_sol. A tx with multiple transfers yields many entries.
+        Pagination-safe: walks back until `until_signature` (exclusive)
+        or the scan limit, so deposits are not lost beyond page one."""
+        from solana.rpc.core import Finalized
+
         out = []
-        for s in sigs.value:
+        all_sigs = []
+        seen_sigs = set()
+        before = None
+        for _ in range(10):
+            sigs = await self.client.get_signatures_for_address(
+                self.keypair.pubkey(), before=before, commitment=Finalized,
+            )
+            page = sigs.value or []
+            new = [s for s in page if str(s.signature) not in seen_sigs]
+            if not new:
+                break
+            for s in new:
+                seen_sigs.add(str(s.signature))
+            all_sigs.extend(new)
+            new_before = str(page[-1].signature)
+            if new_before == before or len(page) < 2:
+                break
+            before = new_before
+        for s in all_sigs:
             if s.err:
                 continue
             tx = await self.client.get_transaction(
                 s.signature, encoding="base64",
-                max_supported_transaction_version=0)
+                max_supported_transaction_version=0, commitment=Finalized)
             if tx.value is None:
                 continue
-            transfer = self._find_incoming_transfer(tx.value)
-            if transfer is not None:
+            for i, transfer in enumerate(
+                    self._find_incoming_transfers(tx.value)):
                 out.append({
                     "signature": str(s.signature),
+                    "index": i,
                     "slot": s.slot,
                     "sender": transfer["sender"],
                     "amount_sol": transfer["amount_sol"],
                 })
         return out
 
-    def _find_incoming_transfer(self, tx_value) -> dict | None:
-        """`tx_value` is the RPC `value` (EncodedConfirmedTransactionWithStatusMeta):
-        the message lives at value.transaction.transaction.message. Works for
-        base64 (VersionedTransaction) and json (UiTransaction) encodings.
-        Only top-level System Program transfers to the treasury count."""
+    async def transfers_to_wallet(self, wallet: str,
+                                 max_signatures: int = 25) -> list[dict]:
+        """FINALIZED SOL transfers from the treasury TO `wallet`.
+        Used to resolve refunds with uncertain outcome."""
+        from solana.rpc.core import Finalized
+        from solders.pubkey import Pubkey
+
+        target = Pubkey.from_string(wallet)
+        me = self.keypair.pubkey()
+        sigs = await self.client.get_signatures_for_address(
+            target, limit=max_signatures, commitment=Finalized)
+        out = []
+        for s in sigs.value:
+            if s.err:
+                continue
+            tx = await self.client.get_transaction(
+                s.signature, encoding="base64",
+                max_supported_transaction_version=0, commitment=Finalized)
+            if tx.value is None:
+                continue
+            for transfer in self._find_incoming_transfers_to(tx.value, target):
+                out.append({"signature": str(s.signature),
+                            "amount_sol": transfer["amount_sol"]})
+        return out
+
+    def _find_incoming_transfers_to(self, tx_value, target) -> list[dict]:
+        """Transfers where dst == target and src == treasury (parsed like
+        _find_incoming_transfers but with an explicit destination)."""
         import base58
         from solders.pubkey import Pubkey
 
         system_program = Pubkey.from_string("11111111111111111111111111111111")
+        found = []
+        try:
+            inner = tx_value.transaction
+            tx = getattr(inner, "transaction", inner)
+            message = tx.message
+            keys = [k if isinstance(k, Pubkey) else Pubkey.from_string(str(k))
+                    for k in message.account_keys]
+            for instr in message.instructions:
+                if keys[instr.program_id_index] != system_program:
+                    continue
+                data = instr.data
+                data = base58.b58decode(data) if isinstance(data, str) else bytes(data)
+                if len(data) != 12 or data[:4] != b"\x02\x00\x00\x00":
+                    continue
+                lamports = int.from_bytes(data[4:12], "little")
+                if lamports <= 0:
+                    continue
+                src = keys[instr.accounts[0]]
+                dst = keys[instr.accounts[1]]
+                if src == me and dst == target:
+                    found.append({"amount_sol": lamports / LAMPORTS})
+        except Exception:
+            return []
+        return found
+
+    def _find_incoming_transfers(self, tx_value) -> list[dict]:
+        """`tx_value` is the RPC `value`. The message lives at
+        value.transaction.transaction.message; works for base64
+        (VersionedTransaction) and json (UiTransaction) encodings.
+        Returns ALL top-level System Program transfers to the treasury
+        (a tx may contain more than one)."""
+        import base58
+        from solders.pubkey import Pubkey
+
+        system_program = Pubkey.from_string("11111111111111111111111111111111")
+        found = []
         try:
             inner = tx_value.transaction
             tx = getattr(inner, "transaction", inner)
@@ -89,7 +169,6 @@ class Chain:
                     continue
                 data = instr.data
                 data = base58.b58decode(data) if isinstance(data, str) else bytes(data)
-                # System program Transfer: instruction id 2 (little-endian u32)
                 if len(data) != 12 or data[:4] != b"\x02\x00\x00\x00":
                     continue
                 lamports = int.from_bytes(data[4:12], "little")
@@ -98,10 +177,11 @@ class Chain:
                 src = keys[instr.accounts[0]]
                 dst = keys[instr.accounts[1]]
                 if dst == me:
-                    return {"sender": str(src), "amount_sol": lamports / LAMPORTS}
+                    found.append({"sender": str(src),
+                                  "amount_sol": lamports / LAMPORTS})
         except Exception:
-            return None
-        return None
+            return []
+        return found
 
     # --- launch support (pump.fun) ---
 

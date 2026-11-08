@@ -15,7 +15,6 @@ class DepositMonitor:
         self.chain = chain
         self.cfg = cfg
         self.conn_factory = conn_factory
-        self.last_signature: str | None = None
 
     async def run(self):
         while True:
@@ -27,6 +26,7 @@ class DepositMonitor:
 
     async def _poll_sol_deposits(self):
         with self.conn_factory() as conn:
+            launched = db.get_meta(conn, "state") == "launched"
             wallet_map = {
                 row["wallet"]: row["telegram_id"]
                 for row in conn.execute(
@@ -35,14 +35,15 @@ class DepositMonitor:
             }
             transfers = await self.chain.incoming_sol_transfers()
             for t in transfers:
-                if t["signature"] == self.last_signature:
-                    break
-                if db.sig_seen(conn, t["signature"]):
+                key = f"{t['signature']}:{t.get('index', 0)}"
+                if db.sig_seen(conn, key):
                     continue
-                await self._process_transfer(conn, t, wallet_map)
-                db.mark_sig(conn, t["signature"])
-            if transfers:
-                self.last_signature = transfers[0]["signature"]
+                if launched:
+                    log.warning("deposit after launch ignored: %s (%.6f SOL)",
+                                t["sender"], t["amount_sol"])
+                else:
+                    await self._process_transfer(conn, t, wallet_map)
+                db.mark_sig(conn, key)
 
     async def _process_transfer(self, conn, transfer, wallet_map):
         sender = transfer["sender"]
@@ -55,6 +56,8 @@ class DepositMonitor:
         if amount_sol < self.cfg.min_deposit_sol:
             log.info("deposit below minimum from %s, ignored", sender)
             return
+        key = f"{transfer['signature']}:{transfer.get('index', 0)}"
         service.record_deposit(conn, telegram_id, amount_sol,
-                               signature=transfer["signature"])
-        log.info("deposit: user=%s sol=%.6f", telegram_id, amount_sol)
+                               signature=key)
+        log.info("deposit: user=%s sol=%.6f (%s)", telegram_id, amount_sol,
+                 key[:16])

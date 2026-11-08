@@ -23,7 +23,7 @@ class LedgerMachine(RuleBasedStateMachine):
 
     def __init__(self):
         super().__init__()
-        self.conn = sqlite3.connect(":memory:")
+        self.conn = sqlite3.connect(":memory:", isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(db.SCHEMA)
         self.model: dict[int, Fraction] = {}
@@ -38,14 +38,14 @@ class LedgerMachine(RuleBasedStateMachine):
     def refund(self, uid, pct):
         c = db.user_contribution(self.conn, uid)
         try:
-            q = service.refund_quote(self.conn, uid, pct / 100, 30)
+            q = service.reserve_refund(self.conn, uid, pct / 100, 30)
         except ValueError:
             assert c <= 1e-9 or self.model.get(uid, 0) == 0
             return
         assert q["refund_sol"] <= c + 1e-12
         assert q["net_sol"] + q["fee_sol"] == pytest.approx(q["refund_sol"])
         assert q["fee_sol"] == pytest.approx(q["refund_sol"] * 0.003)
-        service.confirm_refund(self.conn, uid, q["refund_sol"], q["fee_sol"])
+        service.commit_refund(self.conn, q["pending_id"])
         self.model[uid] = self.model.get(uid, Fraction(0)) - Fraction(q["refund_sol"])
         self.fees += q["fee_sol"]
 
@@ -72,8 +72,8 @@ def test_full_refund_leaves_zero_but_user_still_counted(conn):
     still counted as 'participant' in /info."""
     service.record_deposit(conn, 1, 0.1)
     service.record_deposit(conn, 1, 0.2)
-    q = service.refund_quote(conn, 1, 1.0, 30)
-    service.confirm_refund(conn, 1, q["refund_sol"], q["fee_sol"])
+    q = service.reserve_refund(conn, 1, 1.0, 30)
+    service.commit_refund(conn, q["pending_id"])
     assert abs(service.shares(conn)[1]) < 1e-12
     assert 1 in service.shares(conn)
 
@@ -85,19 +85,19 @@ def test_float_residue_after_partial_refunds(conn):
         service.record_deposit(conn, 1, amt)
     for _ in range(200):
         try:
-            q = service.refund_quote(conn, 1, 0.25, 30)
+            q = service.reserve_refund(conn, 1, 0.25, 30)
         except ValueError:
             break
-        service.confirm_refund(conn, 1, q["refund_sol"], q["fee_sol"])
+        service.commit_refund(conn, q["pending_id"])
     left = db.user_contribution(conn, 1)
     assert left >= 0
-    # documents: quotes keep being accepted for sub-lamport amounts
+    # FIXED: a residue refund is quoted only if it is >= 1 lamport
     if left > 0:
-        q = service.refund_quote(conn, 1, 1.0, 30)
-        assert int(round(q["net_sol"] * 1e9)) == 0  # a 0-lamport transfer would be sent
+        q = service.reserve_refund(conn, 1, 1.0, 30)
+        assert int(round(q["net_sol"] * 1e9)) >= 1
 
 
-@finding("refund_quote accepts sub-lamport refunds (net rounds to 0 lamports)")
+@finding("reserve_refund accepts sub-lamport refunds (net rounds to 0 lamports)")
 def test_refund_quote_rejects_sub_lamport(conn):
     service.record_deposit(conn, 1, 1e-10)
     with pytest.raises(ValueError):
@@ -105,17 +105,17 @@ def test_refund_quote_rejects_sub_lamport(conn):
 
 
 @pytest.mark.parametrize("fraction", [1.5, 2.0])
-@finding("refund_quote does not clamp fraction to [0,1] (docstring says it must)")
+@finding("reserve_refund does not clamp fraction to [0,1] (docstring says it must)")
 def test_refund_fraction_above_one_rejected(conn, fraction):
     service.record_deposit(conn, 1, 1.0)
     with pytest.raises(ValueError):
-        service.refund_quote(conn, 1, fraction, 30)
+        service.reserve_refund(conn, 1, fraction, 30)
 
 
 def test_refund_fee_bps_over_100pct_rejected(conn):
     service.record_deposit(conn, 1, 1.0)
     with pytest.raises(ValueError):
-        service.refund_quote(conn, 1, 0.5, 20_000)
+        service.reserve_refund(conn, 1, 0.5, 20_000)
 
 
 # ---------------- persistence across connections (main.py layout) ----------------
@@ -123,7 +123,9 @@ def test_refund_fee_bps_over_100pct_rejected(conn):
 def test_handler_writes_survive_restart(db_path):
     h = db.open_conn(db_path)
     db.set_wallet(h, 1, "W" * 44)
-    service.confirm_refund(h, 1, 1.0, 0.003)
+    service.record_deposit(h, 1, 1.0)
+    q = service.reserve_refund(h, 1, 1.0, 30)
+    service.commit_refund(h, q["pending_id"])
     db.set_meta(h, "state", "launched")
     h.close()                                   # crash / restart
     with db.connect(db_path) as c:
