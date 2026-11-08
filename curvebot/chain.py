@@ -39,7 +39,10 @@ class Chain:
             to_pubkey=Pubkey.from_string(destination_wallet),
             lamports=int(round(amount_sol * LAMPORTS)),
         ))
-        txn = Transaction.new_signed_with_payer([ix], self.keypair)
+        bh = await self.client.get_latest_blockhash()
+        txn = Transaction.new_signed_with_payer(
+            [ix], self.keypair.pubkey(), [self.keypair],
+            bh.value.blockhash)
         resp = await self.client.send_transaction(txn)
         return str(resp.value)
 
@@ -53,7 +56,8 @@ class Chain:
         for s in sigs.value:
             if s.err:
                 continue
-            tx = await self.client.get_transaction(s.signature)
+            tx = await self.client.get_transaction(
+                s.signature, encoding="base64")
             if tx.value is None:
                 continue
             transfer = self._find_incoming_transfer(tx.value)
@@ -70,9 +74,11 @@ class Chain:
         from solders.pubkey import Pubkey
 
         try:
-            keys = tx_value.transaction.message.account_keys
+            # base64 encoding: compiled tx lives at .transaction.transaction
+            msg = tx_value.transaction.transaction.message
+            keys = msg.account_keys
             me = self.keypair.pubkey()
-            for instr in tx_value.transaction.message.instructions:
+            for instr in msg.instructions:
                 data = bytes(instr.data)
                 # System program Transfer: instruction id 2 (little-endian u32)
                 if len(data) < 12 or data[:4] != b"\x02\x00\x00\x00":
