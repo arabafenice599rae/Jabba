@@ -134,6 +134,7 @@ curvebot/
 | Fee curva pump | 125 bps totali (95 protocollo + 30 creator) | in pump_curve.py, verificato on-chain |
 | Creator fee | +0.30%/trade | NON automatico: si accumula nel creator vault, richiede collect/claim esplicito |
 | Parametri curva | verificati a runtime | launch abortisce se il global account non matcha |
+| Costi lancio | preflight dinamico | dev buy + rent ATA (36 ≈ 0.073 SOL) + fee + tip; rifiuto se insufficiente |
 
 **Atomicità — dichiarazione precisa**: garantita SOLO dentro un singolo
 bundle. Oltre 36 partecipanti il lancio viene rifiutato esplicitamente;
@@ -202,6 +203,10 @@ processed_sigs(signature PK) -- idempotenza depositi
 - **pump_curve.py (6)**: monotonia, fee 1.25%, ~793M token a 85 SOL
   (soglia graduazione), roundtrip base/ui
 - **batch transfer (3)**: costruzione+firma tx offline (RPC fake)
+- **launch/guards (11)**: parsing stati Jito (inflight Pending/Landed/
+  Failed + conferme processed/confirmed/finalized, casi malformati),
+  preflight costi (breakdown esatto, rent 36 utenti ≈ 0.073 SOL,
+  override rent da RPC)
 - **UI (4)**: PNG curva pump valido, layout tastiere
 
 **Non coperto dai test** (mainnet-only, da collaudo in piccolo):

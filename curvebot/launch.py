@@ -68,6 +68,31 @@ def compute_distribution(weights: dict[int, float], tokens_base: int,
     return out, team, dust
 
 
+TOKEN_ACCOUNT_RENT_LAMPORTS = 2_039_280   # rent-exempt minimum, 165 B
+NETWORK_FEE_LAMPORTS = 5_000              # per tx
+BUNDLE_TX_COUNT = 5
+
+
+async def estimate_launch_costs(chain, cfg, n_recipients: int,
+                                dev_buy_sol: float) -> dict:
+    """Full cost of the launch: dev buy + ATA rent for every recipient
+    (worst case: none exists yet) + network fees + priority fee + tip."""
+    try:
+        resp = await chain.client.get_minimum_balance_for_rent_exemption(165)
+        rent = resp.value
+    except Exception:
+        rent = TOKEN_ACCOUNT_RENT_LAMPORTS
+    breakdown = {
+        "dev_buy": int(dev_buy_sol * 1_000_000_000),
+        "ata_rent": rent * n_recipients,
+        "network_fees": NETWORK_FEE_LAMPORTS * BUNDLE_TX_COUNT,
+        "priority_fee": int(cfg.launch_priority_fee * 1_000_000_000),
+        "jito_tip": cfg.jito_tip_lamports,
+    }
+    breakdown["total"] = sum(breakdown.values())
+    return breakdown
+
+
 def plan_chunks(recipients: list) -> list[list]:
     """Split recipients into chunks that fit the tx size limit.
     Raises ValueError if the count exceeds the ATOMIC bundle capacity."""
@@ -148,33 +173,78 @@ class PumpPortal:
             return await r.text()
 
 
+def parse_inflight_status(data: dict) -> str:
+    """getInflightBundleStatuses: status is a single-key map
+    {Pending|Processing|Failed|Landed: {...}}."""
+    try:
+        status = data["result"]["value"][0]["status"]
+        if isinstance(status, dict):
+            return next(iter(status.keys()))
+        return str(status)
+    except (KeyError, IndexError, TypeError):
+        return "Unknown"
+
+
+def parse_confirmation(data: dict) -> str:
+    """getBundleStatuses: per-tx confirmation_status
+    (processed|confirmed|finalized) once the bundle has Landed."""
+    try:
+        txs = data["result"]["value"][0]["transactions"]
+        statuses = {t.get("confirmation_status") for t in txs}
+        if "finalized" in statuses:
+            return "finalized"
+        if "confirmed" in statuses:
+            return "confirmed"
+        if "processed" in statuses:
+            return "processed"
+        return "unknown"
+    except (KeyError, IndexError, TypeError):
+        return "unknown"
+
+
 async def wait_bundle(http: aiohttp.ClientSession, bundle_id: str,
-                      timeout_s: float = 90.0,
+                      land_timeout_s: float = 90.0,
+                      confirm_timeout_s: float = 30.0,
                       poll_s: float = 3.0) -> str:
-    """Poll getBundleStatuses until Landed/Failed or timeout.
-    Returns 'landed' | 'failed' | 'pending' (timeout)."""
+    """Two-phase bundle verification.
+
+    Phase 1 — getInflightBundleStatuses until Landed/Failed.
+    Phase 2 — after Landed, getBundleStatuses until confirmed/finalized.
+
+    Returns: 'finalized' | 'confirmed' | 'failed' | 'pending' (timeout:
+    UNKNOWN outcome -> manual reconciliation, NEVER auto-retry)."""
     import asyncio
     import time
 
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        payload = {"jsonrpc": "2.0", "id": 1, "method": "getBundleStatuses",
-                   "params": [[bundle_id]]}
+    async def rpc(method, params):
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method,
+                   "params": params}
         async with http.post(
                 "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
                 json=payload) as r:
-            data = await r.json()
-        try:
-            value = data["result"]["value"][0]
-            status = value["bundle_status"]
-            if status == "Landed":
-                return "landed"
-            if status in ("Failed", "Invalid"):
-                return "failed"
-        except (KeyError, IndexError):
-            pass
+            return await r.json()
+
+    # phase 1: landing
+    deadline = time.monotonic() + land_timeout_s
+    while time.monotonic() < deadline:
+        status = parse_inflight_status(
+            await rpc("getInflightBundleStatuses", [[bundle_id]]))
+        if status == "Landed":
+            break
+        if status == "Failed":
+            return "failed"
         await asyncio.sleep(poll_s)
-    return "pending"
+    else:
+        return "pending"
+
+    # phase 2: confirmation
+    deadline = time.monotonic() + confirm_timeout_s
+    while time.monotonic() < deadline:
+        conf = parse_confirmation(await rpc("getBundleStatuses", [[bundle_id]]))
+        if conf in ("confirmed", "finalized"):
+            return conf
+        await asyncio.sleep(poll_s)
+    return "confirmed"  # landed but confirmation not yet observed
 
 
 async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
@@ -191,12 +261,18 @@ async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
     if raised <= 0:
         raise RuntimeError("nessun contributo raccolto")
     dev_buy_sol = raised * (100.0 - cfg.team_keep_percent) / 100.0
-    treasury_sol = await chain.balance_sol()
-    if dev_buy_sol > treasury_sol - 0.01:
+    contributions = {u: c for u, c in service.shares(conn).items() if c > 0}
+    costs = await estimate_launch_costs(chain, cfg, len(contributions),
+                                        dev_buy_sol)
+    treasury_lamports = int((await chain.balance_sol()) * 1_000_000_000)
+    if treasury_lamports < costs["total"]:
         raise RuntimeError(
-            f"treasury ({treasury_sol:.4f} SOL) insufficiente per il dev "
-            f"buy ({dev_buy_sol:.4f} SOL): il saldo preesistente non "
-            f"copre la differenza")
+            f"treasury insufficiente: servono {costs['total'] / 1e9:.6f} SOL "
+            f"(dev buy {costs['dev_buy'] / 1e9:.4f} + rent ATA "
+            f"{costs['ata_rent'] / 1e9:.4f} + fee {costs['network_fees'] / 1e9:.6f} "
+            f"+ priority {costs['priority_fee'] / 1e9:.6f} + tip "
+            f"{costs['jito_tip'] / 1e9:.4f}), disponibili "
+            f"{treasury_lamports / 1e9:.6f} SOL")
 
     from solders.keypair import Keypair
     mint_kp = Keypair()
@@ -210,7 +286,6 @@ async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
     tx_create = chain.sign_b58(create_b58, extra_signers=[mint_kp])
 
     expected = tokens_out_for_sol(dev_buy_sol)
-    contributions = {u: c for u, c in service.shares(conn).items() if c > 0}
     dist, team, dust = compute_distribution(
         contributions, expected, cfg.team_share_bps, cfg.safety_bps)
 
@@ -235,13 +310,14 @@ async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
     bundle = [tx_create] + dist_txs
     bundle_id = await chain.send_bundle(http, bundle)
     status = await wait_bundle(http, bundle_id)
-    if status != "landed":
-        if status == "failed":
-            raise RuntimeError(f"bundle fallito ({bundle_id}): "
-                               f"nulla e' stato eseguito, riprovare")
+    if status == "failed":
+        raise RuntimeError(f"bundle fallito ({bundle_id}): "
+                           f"nulla e' stato eseguito, riprovare")
+    if status == "pending":
         raise RuntimeError(
-            f"bundle in attesa oltre il timeout ({bundle_id}): verificare "
-            f"manualmente su Solscan prima di riprovare")
+            f"esito bundle SCONOSCIUTO ({bundle_id}): verificare "
+            f"manualmente su Solscan PRIMA di riprovare (mai retry "
+            f"automatico: rischio doppio lancio)")
 
     sent_base = sum(b for _, b in recipients)
     db.record_launch(conn, mint, bundle_id, bundle_id, dev_buy_sol,
