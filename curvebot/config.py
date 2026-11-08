@@ -22,7 +22,7 @@ class Config:
     token_twitter: str = field(default_factory=lambda: _env("TOKEN_TWITTER", ""))
     token_telegram: str = field(default_factory=lambda: _env("TOKEN_TELEGRAM", ""))
     token_website: str = field(default_factory=lambda: _env("TOKEN_WEBSITE", ""))
-    team_keep_percent: float = field(default_factory=lambda: float(_env("TEAM_KEEP_PERCENT", "20")))
+    team_keep_percent: float = field(default_factory=lambda: float(_env("TEAM_KEEP_PERCENT", "10")))
     team_share_bps: int = field(default_factory=lambda: int(_env("TEAM_SHARE_BPS", "0")))
     launch_slippage: float = field(default_factory=lambda: float(_env("LAUNCH_SLIPPAGE", "10")))
     launch_priority_fee: float = field(default_factory=lambda: float(_env("LAUNCH_PRIORITY_FEE", "0.0005")))

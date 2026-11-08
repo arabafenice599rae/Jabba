@@ -10,7 +10,7 @@ FASE 1 — PRESALE FLAT (bot Telegram, off-chain)
   Nessuna curva propria: il prezzo lo decide pump.fun al lancio.
 
 FASE 2 — LAUNCH ATOMICO (bundle Jito, on-chain, zero-custodia)
-  /launch → TEAM_KEEP_PERCENT% dei SOL resta al treasury (incasso team);
+  /launch → TEAM_KEEP_PERCENT% (default 10) dei SOL resta al treasury;
   il resto → crea token su pump.fun + dev buy + distribuzione
   nello STESSO slot → token 100% agli utenti (∝ SOL versati)
 
@@ -100,7 +100,7 @@ curvebot/
 1. mint_kp = Keypair() casuale
 2. PumpPortal /api/create (multipart: mint, name, symbol, desc, socials,
    image) → tx non firmata → firma client-side [treasury, mint_kp] → tx1
-3. dev_buy_sol = treasury × (100 − TEAM_KEEP_PERCENT)  # default 80%
+3. dev_buy_sol = treasury × (100 − TEAM_KEEP_PERCENT)  # default 90%
 4. PumpPortal /api/trade-local {action:buy, denominatedInSol:true,
    pool:pump} → tx2 firmata
 5. expected = pump_curve.tokens_out_for_sol(dev_buy_sol)   ← DETERMINISTICO
@@ -170,7 +170,7 @@ processed_sigs(signature PK) -- idempotenza depositi
 | MIN_DEPOSIT_SOL | 0.01 | |
 | POLL_INTERVAL_S | 5 | latenza accredito |
 | TOKEN_NAME/SYMBOL/DESCRIPTION/IMAGE_PATH | — | launch |
-| TEAM_KEEP_PERCENT | 20 | % SOL trattenuto dal team |
+| TEAM_KEEP_PERCENT | 10 | % SOL trattenuto dal team |
 | TEAM_SHARE_BPS | 0 | quota token al team (0 = tutti agli utenti) |
 | LAUNCH_SLIPPAGE / PRIORITY_FEE | 10 / 0.0005 | |
 | JITO_TIP_LAMPORTS | 1000000 | 0.001 SOL |

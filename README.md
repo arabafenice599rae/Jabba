@@ -14,7 +14,7 @@ creazione + dev buy + distribuzione ai wallet nello stesso slot.
 - **Quota**: `/position` mostra SOL contribuiti, % del totale e token stimati
   al lancio (matematica pump.fun deterministica).
 - **Lancio atomico**: `/launch` (admin) → il team trattiene
-  `TEAM_KEEP_PERCENT%` dei SOL (default 20%); il resto → bundle Jito con
+  `TEAM_KEEP_PERCENT%` dei SOL (default 10%); il resto → bundle Jito con
   create + dev buy + distribuzione **100% agli utenti** (proporzionale ai
   SOL versati), stesso slot.
 - Idempotenza depositi (dedup firme), whitelist rigida, admin = primo ID.
