@@ -13,10 +13,7 @@ class Config:
     keypair_path: str = field(default_factory=lambda: _env("KEYPAIR_PATH", "treasury.json"))
     db_path: str = field(default_factory=lambda: _env("DB_PATH", "curvebot.db"))
 
-    price_base_sol: float = field(default_factory=lambda: float(_env("PRICE_BASE_SOL", "0.00001")))
-    slope_sol: float = field(default_factory=lambda: float(_env("SLOPE_SOL", "0.0000000005")))
-    buy_fee_bps: int = field(default_factory=lambda: int(_env("BUY_FEE_BPS", "30")))
-    sell_fee_bps: int = field(default_factory=lambda: int(_env("SELL_FEE_BPS", "30")))
+    refund_fee_bps: int = field(default_factory=lambda: int(_env("REFUND_FEE_BPS", "30")))
 
     token_name: str = field(default_factory=lambda: _env("TOKEN_NAME", ""))
     token_symbol: str = field(default_factory=lambda: _env("TOKEN_SYMBOL", ""))

@@ -136,12 +136,11 @@ async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
     tx_buy = chain.sign_b58(buy_b58)
 
     expected = tokens_out_for_sol(dev_buy_sol)
-    positions = {
-        row["telegram_id"]: db.user_position(conn, row["telegram_id"])
-        for row in conn.execute("SELECT DISTINCT telegram_id FROM ledger")
+    contributions = {
+        uid: c for uid, c in service.shares(conn).items() if c > 0
     }
-    positions = {uid: p for uid, p in positions.items() if p > 0}
-    dist, team = compute_distribution(positions, expected, cfg.team_share_bps)
+    dist, team = compute_distribution(contributions, expected,
+                                      cfg.team_share_bps)
 
     wallets = {uid: db.get_wallet(conn, uid) for uid, _ in dist}
     recipients = [

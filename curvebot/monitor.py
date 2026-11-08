@@ -6,7 +6,6 @@ import asyncio
 import logging
 
 from . import db, service
-from .curve import LinearCurve
 
 log = logging.getLogger("monitor")
 
@@ -46,7 +45,6 @@ class DepositMonitor:
                 self.last_signature = transfers[0]["signature"]
 
     async def _process_transfer(self, conn, transfer, wallet_map):
-        curve = LinearCurve(self.cfg.price_base_sol, self.cfg.slope_sol)
         sender = transfer["sender"]
         amount_sol = transfer["amount_sol"]
         telegram_id = wallet_map.get(sender)
@@ -57,8 +55,6 @@ class DepositMonitor:
         if amount_sol < self.cfg.min_deposit_sol:
             log.info("deposit below minimum from %s, ignored", sender)
             return
-        result = service.buy(conn, curve, telegram_id, amount_sol,
-                             self.cfg.buy_fee_bps,
-                             signature=transfer["signature"])
-        log.info("buy: user=%s sol=%.6f fee=%.6f tokens=%.4f",
-                 telegram_id, amount_sol, result["fee_sol"], result["tokens"])
+        service.record_deposit(conn, telegram_id, amount_sol,
+                               signature=transfer["signature"])
+        log.info("deposit: user=%s sol=%.6f", telegram_id, amount_sol)

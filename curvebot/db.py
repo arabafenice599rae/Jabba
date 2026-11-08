@@ -11,9 +11,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id INTEGER NOT NULL,
-    kind TEXT NOT NULL,             -- 'buy' | 'sell'
+    kind TEXT NOT NULL,             -- 'deposit' | 'refund'
     amount_sol REAL NOT NULL,
-    amount_tokens REAL NOT NULL,
     fee_sol REAL NOT NULL DEFAULT 0,
     signature TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -61,30 +60,31 @@ def connect(db_path: str):
         conn.close()
 
 
-def get_state(conn: sqlite3.Connection) -> dict:
+def user_contribution(conn: sqlite3.Connection, telegram_id: int) -> float:
+    """Net SOL contributed (deposits - refunds)."""
     row = conn.execute(
-        "SELECT COALESCE(SUM(CASE kind WHEN 'buy' THEN amount_tokens "
-        "ELSE -amount_tokens END), 0) AS supply FROM ledger"
-    ).fetchone()
-    return {"supply_tokens": row["supply"]}
-
-
-def user_position(conn: sqlite3.Connection, telegram_id: int) -> float:
-    row = conn.execute(
-        "SELECT COALESCE(SUM(CASE kind WHEN 'buy' THEN amount_tokens ELSE -amount_tokens END), 0) AS pos "
-        "FROM ledger WHERE telegram_id = ?",
+        "SELECT COALESCE(SUM(CASE kind WHEN 'deposit' THEN amount_sol "
+        "ELSE -amount_sol END), 0) AS c FROM ledger WHERE telegram_id = ?",
         (telegram_id,),
     ).fetchone()
-    return row["pos"]
+    return row["c"]
+
+
+def total_raised(conn: sqlite3.Connection) -> float:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(CASE kind WHEN 'deposit' THEN amount_sol "
+        "ELSE -amount_sol END), 0) AS t FROM ledger"
+    ).fetchone()
+    return row["t"]
 
 
 def record(conn: sqlite3.Connection, telegram_id: int, kind: str,
-           amount_sol: float, amount_tokens: float, fee_sol: float = 0.0,
+           amount_sol: float, fee_sol: float = 0.0,
            signature: str | None = None) -> None:
     conn.execute(
-        "INSERT INTO ledger (telegram_id, kind, amount_sol, amount_tokens, fee_sol, signature) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (telegram_id, kind, amount_sol, amount_tokens, fee_sol, signature),
+        "INSERT INTO ledger (telegram_id, kind, amount_sol, fee_sol, signature) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (telegram_id, kind, amount_sol, fee_sol, signature),
     )
 
 

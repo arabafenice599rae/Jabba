@@ -5,8 +5,9 @@
 Sistema in due fasi per emettere un token community su Solana:
 
 ```
-FASE 1 — PRESALE (bot Telegram, off-chain)
-  Depositi SOL → crediti token su curva lineare propria (ledger SQLite)
+FASE 1 — PRESALE FLAT (bot Telegram, off-chain)
+  Depositi SOL → ledger dei contributi (quota proporzionale ai SOL).
+  Nessuna curva propria: il prezzo lo decide pump.fun al lancio.
 
 FASE 2 — LAUNCH ATOMICO (bundle Jito, on-chain, zero-custodia)
   /launch → crea token su pump.fun + dev buy + distribuzione
@@ -34,10 +35,8 @@ FASE 3 — MERCATO (pump.fun, automatico)
 
 ```
 curvebot/
-├── curve.py      Curva lineare presale: p(s)=P0+M·s
-│                 Buy = ∫ p ds (soluzione quadratica), sell = ∫ con clamp
-├── service.py   Buy/sell ledger con fee (buy fee pre-calcolo token,
-│                 sell fee sui proventi); separato dalla matematica pura
+├── service.py   Ledger presale: depositi SOL, rimborsi con fee,
+│                 quote e shares proporzionali
 ├── db.py         SQLite: users(wallet), ledger(buy/sell), launches,
 │                 meta(state,mint), processed_sigs(idempotenza)
 ├── chain.py      Solana: keypair treasury, balance, send SOL,
@@ -61,22 +60,22 @@ curvebot/
 ### 3.1 Meccanica
 
 - Un solo indirizzo Solana: il **treasury** (keypair file, mai nel codice)
-- Il "token" presale è un **credito nel ledger**, non un asset on-chain
-- Prezzo: `p(supply) = P0 + M·supply` (default P0=0.00001, M=5e-10)
-- **Buy**: fee 0,30% trattenuta prima; token = soluzione di
-  `P0·x + M·s·x + (M/2)x² = netto` (quadratica, integrazione esatta)
-- **Sell**: provento = `P0·x + M(s·x − x²/2)`, fee 0,30% sul lordo
-- Proprietà: vendere x token comprati a supply s+x restituisce lo stesso
-  valore di acquisto (pre-fee) → **treasury sempre solvente per costruzione**
+- Il presale è **flat**: nessuna curva propria, nessun token off-chain.
+  Il ledger registra solo chi ha versato quanti SOL (netto dei rimborsi)
+- La quota di ciascuno = suoi SOL / SOL totali; il prezzo per token lo
+  determina la curva pump.fun al dev buy (bottom, deterministico)
+- **Rimborso libero**: `/refund` 25/50/75/100% → fee REFUND_FEE_BPS
+  (default 0,30%) → SOL restituiti al wallet registrato; chiusi dopo il lancio
+- Fairness: chi entra prima e chi entra dopo pagano lo stesso prezzo
 
 ### 3.2 Flusso utente
 
 1. `/setwallet <pubkey>` → wallet registrato (per depositi e rimborsi)
-2. Invio SOL al treasury → monitor (polling, dedup firme) accredita token
-   entro ~POLL_INTERVAL_S; depositi sotto MIN_DEPOSIT_SOL o da wallet
+2. Invio SOL al treasury → monitor (polling, dedup firme) registra il
+   contributo entro ~POLL_INTERVAL_S; sotto MIN_DEPOSIT_SOL o da wallet
    sconosciuti: ignorati + loggati
-3. `/sell <x|%>` → bottoni 25/50/75/100% → quotazione con fee →
-   conferma ✅/❌ → invio SOL al wallet → debito ledger
+3. `/position` → SOL contribuiti, % del presale, token stimati al lancio
+4. `/refund` → bottoni % → quotazione con fee → conferma ✅/❌ → SOL indietro
 
 ### 3.3 Sicurezza
 
@@ -105,8 +104,8 @@ curvebot/
    pool:pump} → tx2 firmata
 5. expected = pump_curve.tokens_out_for_sol(dev_buy_sol)   ← DETERMINISTICO
    (curva vergine: il token esiste solo dentro il bundle)
-6. dist, team = compute_distribution(posizioni, expected, TEAM_SHARE_BPS)
-   → proporzionale esatto, dust all'ultimo utente, team in treasury
+6. dist, team = compute_distribution(contributi SOL, expected, TEAM_SHARE_BPS)
+   → proporzionale ai SOL versati, dust all'ultimo utente, team in treasury
 7. chunks da 15 → build_distribution_tx per chunk:
    create_idempotent_ATA + transfer_checked (6 decimali) per utente
    + tip JITO_TIP_LAMPORTS nell'ULTIMA tx
@@ -147,7 +146,7 @@ curvebot/
 
 ```sql
 users(telegram_id PK, wallet, created_at)
-ledger(id, telegram_id, kind['buy'|'sell'], amount_sol, amount_tokens,
+ledger(id, telegram_id, kind['deposit'|'refund'], amount_sol,
        fee_sol, signature, created_at)
 launches(id, mint, sig_create, sig_buy, dev_buy_sol, tokens_bought,
          tokens_distributed, team_tokens, created_at)
@@ -155,8 +154,8 @@ meta(key PK, value)          -- state: launched, mint: <pubkey>
 processed_sigs(signature PK) -- idempotenza depositi
 ```
 
-- `supply = Σ(buy) − Σ(sell)` (corretto dopo bug-fix da test)
-- Posizione utente = Σ(buy) − Σ(sell) per telegram_id
+- Contributo utente = Σ(deposit) − Σ(refund)
+- Totale presale = Σ contributi di tutti
 
 ## 7. Configurazione (.env)
 
@@ -165,8 +164,7 @@ processed_sigs(signature PK) -- idempotenza depositi
 | TELEGRAM_BOT_TOKEN | — | da BotFather |
 | RPC_URL | devnet public | mainnet: Helius/QuickNode |
 | KEYPAIR_PATH | treasury.json | keypair treasury |
-| PRICE_BASE_SOL / SLOPE_SOL | 1e-5 / 5e-10 | curva presale |
-| BUY_FEE_BPS / SELL_FEE_BPS | 30 / 30 | 0.30% |
+| REFUND_FEE_BPS | 30 | fee rimborso 0.30% |
 | ALLOWED_TELEGRAM_IDS | — | obbligatorio; [0]=admin |
 | MIN_DEPOSIT_SOL | 0.01 | |
 | POLL_INTERVAL_S | 5 | latenza accredito |
@@ -182,23 +180,21 @@ processed_sigs(signature PK) -- idempotenza depositi
 |---|---|---|
 | /start /menu | whitelist | pannello bottoni |
 | /setwallet | whitelist | registra wallet |
-| /info /price /position /chart | whitelist | stato |
-| /sell | whitelist | vendita guidata con conferma |
+| /info /position | whitelist | stato presale e quota |
+| /refund | whitelist | rimborso guidato con conferma (pre-lancio) |
 | /launch | admin | lancio atomico (doppia conferma) |
 
-## 9. Test (42)
+## 9. Test (27)
 
-- **curve.py (10)**: inversione buy/costo, coerenza sell≈buy, fee, clamp,
-  monotonia prezzo
-- **service.py (8)**: fee buy trattenuta, roundtrip supply→0, rifiuti
-- **db.py (4)**: wallet, posizioni, supply globale, dedup firme
-- **launch.py (5)**: distribuzione proporzionale esatta, team share,
-  somma senza perdite, casi limite
+- **presale/service (5)**: contributi, rimborso parziale/totale con fee,
+  rifiuti, shares
+- **db (4)**: wallet, contributi, totale globale, dedup firme
+- **launch.py (5)**: distribuzione proporzionale esatta (pesi SOL), team
+  share, somma senza perdite, casi limite
 - **pump_curve.py (6)**: monotonia, fee 1.25%, ~793M token a 85 SOL
   (soglia graduazione), roundtrip base/ui
-- **batch transfer (3)**: costruzione+firma tx offline (RPC fake),
-  skip importi zero
-- **UI (6)**: PNG valido, layout tastiere
+- **batch transfer (3)**: costruzione+firma tx offline (RPC fake)
+- **UI (4)**: PNG curva pump valido, layout tastiere
 
 **Non coperto dai test** (mainnet-only, da collaudo in piccolo):
 sequenza reale PumpPortal create→buy→bundle Jito; parsing depositi in

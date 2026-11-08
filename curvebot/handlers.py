@@ -1,4 +1,4 @@
-"""Telegram handlers: commands + inline button callbacks (aiogram 3)."""
+"""Telegram handlers: presale (flat, SOL-based) + atomic launch."""
 
 from __future__ import annotations
 
@@ -7,17 +7,12 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from . import db, service
-from .chart import render_curve_png
-from .curve import LinearCurve
-from .keyboards import back_to_menu, main_menu, sell_amounts, sell_confirm
+from .keyboards import back_to_menu, main_menu
+from .pump_curve import tokens_out_for_sol
 
 router = Router()
 
-PENDING_SELLS: dict[int, dict] = {}
-
-
-def _curve(cfg) -> LinearCurve:
-    return LinearCurve(cfg.price_base_sol, cfg.slope_sol)
+PENDING_REFUNDS: dict[int, dict] = {}
 
 
 def _guard(cfg, user_id: int) -> bool:
@@ -26,16 +21,32 @@ def _guard(cfg, user_id: int) -> bool:
     return user_id in cfg.allowed_ids
 
 
-def _fmt_info(cfg, conn, chain_pubkey: str, supply: float, sol: float) -> str:
-    curve = _curve(cfg)
+def _est_tokens(conn, cfg, contribution: float) -> float:
+    """Estimated tokens at launch for a contribution, given treasury size."""
+    raised = db.total_raised(conn)
+    if raised <= 0:
+        return 0.0
+    dev_buy = raised * cfg.dev_buy_percent / 100.0
+    expected = tokens_out_for_sol(dev_buy)
+    user_share = tokens_out_for_sol(dev_buy * contribution / raised)
+    return user_share * (1 - cfg.team_share_bps / 10_000.0)
+
+
+def _fmt_info(cfg, conn, chain_pubkey: str, sol: float) -> str:
+    raised = db.total_raised(conn)
+    n = len(service.shares(conn))
+    est = tokens_out_for_sol(raised * cfg.dev_buy_percent / 100.0) \
+        if raised > 0 else 0.0
     return (
-        f"🏦 <b>Jabba Curve</b>\n\n"
-        f"💎 <b>Prezzo attuale:</b> <code>{curve.price_sol(supply):.10f}</code> SOL\n"
-        f"📈 <b>Supply emesso:</b> <code>{supply:,.2f}</code>\n"
-        f"💰 <b>SOL accumulati:</b> <code>{sol:.4f}</code>\n"
-        f"🧾 <b>Fee:</b> {cfg.buy_fee_bps / 100:.2f}% buy · {cfg.sell_fee_bps / 100:.2f}% sell\n"
+        f"🏦 <b>Jabba Presale</b>\n\n"
+        f"💰 <b>Raccolto:</b> <code>{raised:.4f} SOL</code>\n"
+        f"👥 <b>Partecipanti:</b> <code>{n}</code>\n"
+        f"🪙 <b>Token stimati al lancio:</b> <code>{est:,.0f}</code>\n"
+        f"🧾 <b>Fee rimborso:</b> {cfg.refund_fee_bps / 100:.2f}%\n"
+        f"🧾 <b>Quota team al lancio:</b> {cfg.team_share_bps / 100:.2f}%\n"
         f"⬇️ <b>Deposito minimo:</b> {cfg.min_deposit_sol} SOL\n\n"
-        f"📬 <b>Indirizzo deposito:</b>\n<code>{chain_pubkey}</code>"
+        f"📬 <b>Indirizzo deposito:</b>\n<code>{chain_pubkey}</code>\n\n"
+        f"💰 <b>Treasury:</b> <code>{sol:.4f} SOL</code>"
     )
 
 
@@ -48,25 +59,12 @@ async def _edit(call: CallbackQuery, text: str, markup=None):
 
 # --- commands ---
 
-@router.message(Command("start", "help"))
+@router.message(Command("start", "help", "menu"))
 async def cmd_start(message: Message, cfg, conn, chain):
     if not _guard(cfg, message.from_user.id):
         return
-    supply = db.get_state(conn)["supply_tokens"]
     sol = await chain.balance_sol()
-    await message.answer(
-        _fmt_info(cfg, conn, chain.pubkey, supply, sol),
-        reply_markup=main_menu(),
-    )
-
-
-@router.message(Command("menu"))
-async def cmd_menu(message: Message, cfg, conn, chain):
-    if not _guard(cfg, message.from_user.id):
-        return
-    supply = db.get_state(conn)["supply_tokens"]
-    sol = await chain.balance_sol()
-    await message.answer(_fmt_info(cfg, conn, chain.pubkey, supply, sol),
+    await message.answer(_fmt_info(cfg, conn, chain.pubkey, sol),
                          reply_markup=main_menu())
 
 
@@ -74,44 +72,45 @@ async def cmd_menu(message: Message, cfg, conn, chain):
 async def cmd_info(message: Message, cfg, conn, chain):
     if not _guard(cfg, message.from_user.id):
         return
-    supply = db.get_state(conn)["supply_tokens"]
     sol = await chain.balance_sol()
-    await message.answer(_fmt_info(cfg, conn, chain.pubkey, supply, sol))
-
-
-@router.message(Command("price"))
-async def cmd_price(message: Message, cfg, conn):
-    if not _guard(cfg, message.from_user.id):
-        return
-    supply = db.get_state(conn)["supply_tokens"]
-    await message.answer(
-        f"💎 Prezzo: <code>{_curve(cfg).price_sol(supply):.10f}</code> SOL/token"
-    )
+    await message.answer(_fmt_info(cfg, conn, chain.pubkey, sol))
 
 
 @router.message(Command("position"))
 async def cmd_position(message: Message, cfg, conn):
     if not _guard(cfg, message.from_user.id):
         return
-    pos = db.user_position(conn, message.from_user.id)
-    curve = _curve(cfg)
-    supply = db.get_state(conn)["supply_tokens"]
-    value = curve.sell_proceeds_sol(pos, supply, cfg.sell_fee_bps)[1]
+    c = db.user_contribution(conn, message.from_user.id)
+    raised = db.total_raised(conn)
+    share = c / raised * 100 if raised > 0 else 0
+    est = _est_tokens(conn, cfg, c)
     await message.answer(
         f"📊 <b>Posizione</b>\n\n"
-        f"🪙 Token: <code>{pos:,.4f}</code>\n"
-        f"💵 Valore se vendi ora (netto fee): <code>{value:.6f}</code> SOL"
+        f"💰 Contribuito: <code>{c:.4f} SOL</code>\n"
+        f"📈 Quota: <code>{share:.2f}%</code> del presale\n"
+        f"🪙 Token stimati al lancio: <code>{est:,.0f}</code>"
     )
 
 
-@router.message(Command("chart", "curva"))
-async def cmd_chart(message: Message, cfg, conn):
+@router.message(Command("refund"))
+async def cmd_refund(message: Message, cfg, conn):
     if not _guard(cfg, message.from_user.id):
         return
-    supply = db.get_state(conn)["supply_tokens"]
-    png = render_curve_png(cfg.price_base_sol, cfg.slope_sol, supply,
-                           fee_pct=cfg.buy_fee_bps / 100)
-    await message.answer_photo(png, caption="📈 <b>Bonding curve</b>")
+    c = db.user_contribution(conn, message.from_user.id)
+    if c <= 0:
+        await message.answer("Nessun contributo da rimborsare.")
+        return
+    await message.answer(
+        f"↩️ <b>Rimborso</b>\n\nHai contribuito <code>{c:.4f} SOL</code>.\n"
+        f"Quanto vuoi rimborsare? (fee {cfg.refund_fee_bps / 100:.2f}%)",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="25%", callback_data="refund:amt:25"),
+             InlineKeyboardButton(text="50%", callback_data="refund:amt:50")],
+            [InlineKeyboardButton(text="75%", callback_data="refund:amt:75"),
+             InlineKeyboardButton(text="100%", callback_data="refund:amt:100")],
+            [InlineKeyboardButton(text="↩️ Indietro", callback_data="menu:back")],
+        ]),
+    )
 
 
 @router.message(Command("setwallet"))
@@ -126,172 +125,11 @@ async def cmd_setwallet(message: Message, command: CommandObject, cfg, conn):
     await message.answer(f"✅ Wallet registrato:\n<code>{wallet}</code>")
 
 
-@router.message(Command("sell"))
-async def cmd_sell_text(message: Message, command: CommandObject, cfg, conn):
-    if not _guard(cfg, message.from_user.id):
-        return
-    pos = db.user_position(conn, message.from_user.id)
-    if pos <= 0:
-        await message.answer("Nessun token da vendere.")
-        return
-    await message.answer(
-        f"📤 <b>Vendi token</b>\n\nHai <code>{pos:,.4f}</code> token.\n"
-        f"Quanto vuoi vendere?",
-        reply_markup=sell_amounts(),
-    )
-
-
-# --- callbacks ---
-
-@router.callback_query(F.data == "menu:back")
-async def cb_back(call: CallbackQuery, cfg, conn, chain):
-    if not _guard(cfg, call.from_user.id):
-        return await call.answer()
-    supply = db.get_state(conn)["supply_tokens"]
-    sol = await chain.balance_sol()
-    await _edit(call, _fmt_info(cfg, conn, chain.pubkey, supply, sol), main_menu())
-
-
-@router.callback_query(F.data == "menu:info")
-async def cb_info(call: CallbackQuery, cfg, conn, chain):
-    if not _guard(cfg, call.from_user.id):
-        return await call.answer()
-    supply = db.get_state(conn)["supply_tokens"]
-    sol = await chain.balance_sol()
-    await _edit(call, _fmt_info(cfg, conn, chain.pubkey, supply, sol), back_to_menu())
-    await call.answer()
-
-
-@router.callback_query(F.data == "menu:position")
-async def cb_position(call: CallbackQuery, cfg, conn):
-    if not _guard(cfg, call.from_user.id):
-        return await call.answer()
-    pos = db.user_position(conn, call.from_user.id)
-    curve = _curve(cfg)
-    supply = db.get_state(conn)["supply_tokens"]
-    value = curve.sell_proceeds_sol(pos, supply, cfg.sell_fee_bps)[1]
-    await _edit(call, (
-        f"📊 <b>Posizione</b>\n\n"
-        f"🪙 Token: <code>{pos:,.4f}</code>\n"
-        f"💵 Valore se vendi ora (netto fee): <code>{value:.6f}</code> SOL"
-    ), back_to_menu())
-    await call.answer()
-
-
-@router.callback_query(F.data == "menu:chart")
-async def cb_chart(call: CallbackQuery, cfg, conn):
-    if not _guard(cfg, call.from_user.id):
-        return await call.answer()
-    supply = db.get_state(conn)["supply_tokens"]
-    png = render_curve_png(cfg.price_base_sol, cfg.slope_sol, supply,
-                           fee_pct=cfg.buy_fee_bps / 100)
-    await call.message.answer_photo(png, caption="📈 <b>Bonding curve</b>",
-                                     reply_markup=back_to_menu())
-    await call.answer()
-
-
-@router.callback_query(F.data == "menu:howbuy")
-async def cb_howbuy(call: CallbackQuery, cfg):
-    if not _guard(cfg, call.from_user.id):
-        return await call.answer()
-    await _edit(call, (
-        "💰 <b>Come comprare</b>\n\n"
-        f"1️⃣ Registra il wallet: <code>/setwallet &lt;pubkey&gt;</code>\n"
-        "2️⃣ Manda SOL all'indirizzo deposito (puoi copiarlo da ℹ️ Info)\n"
-        f"3️⃣ Entro ~{cfg.poll_interval_s:.0f}s il bot accredita i token\n\n"
-        f"🧾 Fee buy: <b>{cfg.buy_fee_bps / 100:.2f}%</b> · "
-        f"minimo <b>{cfg.min_deposit_sol} SOL</b>"
-    ), back_to_menu())
-    await call.answer()
-
-
-@router.callback_query(F.data == "sell:open")
-async def cb_sell_open(call: CallbackQuery, cfg, conn):
-    if not _guard(cfg, call.from_user.id):
-        return await call.answer()
-    pos = db.user_position(conn, call.from_user.id)
-    if pos <= 0:
-        await _edit(call, "😕 Nessun token da vendere.", back_to_menu())
-        return await call.answer()
-    await _edit(call, (
-        f"📤 <b>Vendi token</b>\n\nHai <code>{pos:,.4f}</code> token.\n"
-        f"Quanto vuoi vendere?"
-    ), sell_amounts())
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("sell:amt:"))
-async def cb_sell_amt(call: CallbackQuery, cfg, conn):
-    if not _guard(cfg, call.from_user.id):
-        return await call.answer()
-    pct = int(call.data.split(":")[2])
-    pos = db.user_position(conn, call.from_user.id)
-    tokens = pos * pct / 100.0
-    curve = _curve(cfg)
-    try:
-        result = service.sell(conn, curve, call.from_user.id, tokens,
-                              cfg.sell_fee_bps)
-    except ValueError as e:
-        await call.answer(str(e), show_alert=True)
-        return
-    PENDING_SELLS[call.from_user.id] = result
-    await _edit(call, (
-        f"📤 <b>Conferma vendita</b>\n\n"
-        f"🪙 Vendita: <code>{result['tokens']:,.4f}</code> token ({pct}%)\n"
-        f"💵 Lordo: <code>{result['gross_sol']:.6f}</code> SOL\n"
-        f"🧾 Fee ({cfg.sell_fee_bps / 100:.2f}%): <code>{result['fee_sol']:.6f}</code> SOL\n"
-        f"✅ Ricevi: <b>{result['net_sol']:.6f} SOL</b>\n\n"
-        f"Confermi?"
-    ), sell_confirm())
-    await call.answer()
-
-
-@router.callback_query(F.data == "sell:go")
-async def cb_sell_go(call: CallbackQuery, cfg, conn, chain):
-    if not _guard(cfg, call.from_user.id):
-        return await call.answer()
-    result = PENDING_SELLS.pop(call.from_user.id, None)
-    if result is None:
-        await call.answer("Quotazione scaduta, ripeti la vendita.", show_alert=True)
-        return
-    wallet = db.get_wallet(conn, call.from_user.id)
-    if not wallet:
-        await _edit(call, "Registra prima il wallet: /setwallet <pubkey>", back_to_menu())
-        return
-    treasury = await chain.balance_sol()
-    if treasury < result["net_sol"]:
-        await _edit(call, "😕 Treasury SOL insufficiente, riprova più tardi.", back_to_menu())
-        return
-    try:
-        sig = await chain.send_sol(wallet, result["net_sol"])
-    except Exception:
-        await _edit(call, "❌ Invio SOL fallito, riprova.", back_to_menu())
-        return
-    service.confirm_sell(conn, call.from_user.id, result["tokens"],
-                         result["gross_sol"], result["fee_sol"], signature=sig)
-    await _edit(call, (
-        f"✅ <b>Vendita completata</b>\n\n"
-        f"🪙 Venduti: <code>{result['tokens']:,.4f}</code> token\n"
-        f"💸 Inviati: <b>{result['net_sol']:.6f} SOL</b> → <code>{wallet[:6]}…{wallet[-4:]}</code>\n"
-        f"🧾 Fee: <code>{result['fee_sol']:.6f}</code> SOL\n"
-        f"📊 Saldo residuo: <code>{result['position_after']:,.4f}</code> token"
-    ), back_to_menu())
-    await call.answer()
-
-
-@router.callback_query(F.data == "sell:cancel")
-async def cb_sell_cancel(call: CallbackQuery, cfg):
-    PENDING_SELLS.pop(call.from_user.id, None)
-    await _edit(call, "❌ Vendita annullata.", back_to_menu())
-    await call.answer()
-
-
 @router.message(Command("launch"))
 async def cmd_launch(message: Message, cfg, conn):
     if not _guard(cfg, message.from_user.id):
         return
-    admin_id = cfg.allowed_ids[0]
-    if message.from_user.id != admin_id:
+    if message.from_user.id != cfg.allowed_ids[0]:
         await message.answer("Solo l'amministratore può lanciare.")
         return
     if db.get_meta(conn, "state") == "launched":
@@ -301,26 +139,163 @@ async def cmd_launch(message: Message, cfg, conn):
     if not cfg.token_name or not cfg.token_symbol:
         await message.answer("Configura TOKEN_NAME e TOKEN_SYMBOL nel .env.")
         return
-    positions = {
-        row["telegram_id"]: db.user_position(conn, row["telegram_id"])
-        for row in conn.execute("SELECT DISTINCT telegram_id FROM ledger")
-    }
-    positions = {u: p for u, p in positions.items() if p > 0}
-    if not positions:
-        await message.answer("Nessuna posizione nel presale, niente da lanciare.")
+    contributions = {u: c for u, c in service.shares(conn).items() if c > 0}
+    if not contributions:
+        await message.answer("Nessun contributo nel presale, niente da lanciare.")
         return
+    raised = db.total_raised(conn)
     await message.answer(
         f"🚀 <b>LANCIO SU PUMP.FUN</b>\n\n"
         f"Token: <b>{cfg.token_name}</b> (${cfg.token_symbol})\n"
-        f"Partecipanti: <b>{len(positions)}</b>\n"
+        f"Raccolto: <b>{raised:.4f} SOL</b> ({len(contributions)} partecipanti)\n"
         f"Dev buy: <b>{cfg.dev_buy_percent}%</b> del treasury\n"
-        f"Quota team: <b>{cfg.team_share_bps / 100:.2f}%</b> (il resto agli utenti)\n\n"
+        f"Quota team: <b>{cfg.team_share_bps / 100:.2f}%</b> (il resto agli utenti)\n"
+        f"Bundle atomico: create + buy + distribuzione nello stesso slot\n\n"
         f"⚠️ Irreversibile, su mainnet. Confermi?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="🚀 LANCIA ORA", callback_data="launch:go"),
             InlineKeyboardButton(text="❌ Annulla", callback_data="launch:cancel"),
         ]]),
     )
+
+
+# --- callbacks ---
+
+@router.callback_query(F.data == "menu:back")
+async def cb_back(call: CallbackQuery, cfg, conn, chain):
+    if not _guard(cfg, call.from_user.id):
+        return await call.answer()
+    sol = await chain.balance_sol()
+    await _edit(call, _fmt_info(cfg, conn, chain.pubkey, sol), main_menu())
+
+
+@router.callback_query(F.data == "menu:info")
+async def cb_info(call: CallbackQuery, cfg, conn, chain):
+    if not _guard(cfg, call.from_user.id):
+        return await call.answer()
+    sol = await chain.balance_sol()
+    await _edit(call, _fmt_info(cfg, conn, chain.pubkey, sol), back_to_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:position")
+async def cb_position(call: CallbackQuery, cfg, conn):
+    if not _guard(cfg, call.from_user.id):
+        return await call.answer()
+    c = db.user_contribution(conn, call.from_user.id)
+    raised = db.total_raised(conn)
+    share = c / raised * 100 if raised > 0 else 0
+    est = _est_tokens(conn, cfg, c)
+    await _edit(call, (
+        f"📊 <b>Posizione</b>\n\n"
+        f"💰 Contribuito: <code>{c:.4f} SOL</code>\n"
+        f"📈 Quota: <code>{share:.2f}%</code> del presale\n"
+        f"🪙 Token stimati al lancio: <code>{est:,.0f}</code>"
+    ), back_to_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:howbuy")
+async def cb_howbuy(call: CallbackQuery, cfg):
+    if not _guard(cfg, call.from_user.id):
+        return await call.answer()
+    await _edit(call, (
+        "💰 <b>Come partecipare</b>\n\n"
+        f"1️⃣ Registra il wallet: <code>/setwallet &lt;pubkey&gt;</code>\n"
+        "2️⃣ Manda SOL all'indirizzo deposito (da ℹ️ Info)\n"
+        f"3️⃣ Entro ~{cfg.poll_interval_s:.0f}s il contributo è registrato\n\n"
+        f"Al lancio ricevi token proporzionali ai tuoi SOL.\n"
+        f"🧾 Rimborso libero prima del lancio: fee {cfg.refund_fee_bps / 100:.2f}%\n"
+        f"⬇️ Minimo <b>{cfg.min_deposit_sol} SOL</b>"
+    ), back_to_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:chart")
+async def cb_chart(call: CallbackQuery, cfg, conn):
+    if not _guard(cfg, call.from_user.id):
+        return await call.answer()
+    from .chart import render_pump_curve_png
+    raised = db.total_raised(conn)
+    png = render_pump_curve_png(dev_buy_sol=raised * cfg.dev_buy_percent / 100.0)
+    await call.message.answer_photo(
+        png, caption="📈 <b>Curva pump.fun attesa</b> (dev buy al lancio)",
+        reply_markup=back_to_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("refund:amt:"))
+async def cb_refund_amt(call: CallbackQuery, cfg, conn):
+    if not _guard(cfg, call.from_user.id):
+        return await call.answer()
+    if db.get_meta(conn, "state") == "launched":
+        await call.answer("Presale già lanciato: rimborsi chiusi.",
+                          show_alert=True)
+        return
+    pct = int(call.data.split(":")[2])
+    try:
+        quote = service.refund_quote(conn, call.from_user.id, pct / 100.0,
+                                     cfg.refund_fee_bps)
+    except ValueError as e:
+        await call.answer(str(e), show_alert=True)
+        return
+    PENDING_REFUNDS[call.from_user.id] = quote
+    await _edit(call, (
+        f"↩️ <b>Conferma rimborso</b>\n\n"
+        f"💰 Rimborso: <code>{quote['refund_sol']:.4f} SOL</code> ({pct}%)\n"
+        f"🧾 Fee ({cfg.refund_fee_bps / 100:.2f}%): <code>{quote['fee_sol']:.6f} SOL</code>\n"
+        f"✅ Ricevi: <b>{quote['net_sol']:.6f} SOL</b>\n"
+        f"📉 Contributo residuo: <code>{quote['contribution_after']:.4f} SOL</code>\n\n"
+        f"Confermi?"
+    ), InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Conferma rimborso", callback_data="refund:go"),
+        InlineKeyboardButton(text="❌ Annulla", callback_data="refund:cancel"),
+    ]]))
+    await call.answer()
+
+
+@router.callback_query(F.data == "refund:go")
+async def cb_refund_go(call: CallbackQuery, cfg, conn, chain):
+    if not _guard(cfg, call.from_user.id):
+        return await call.answer()
+    quote = PENDING_REFUNDS.pop(call.from_user.id, None)
+    if quote is None:
+        await call.answer("Quotazione scaduta, ripeti.", show_alert=True)
+        return
+    if db.get_meta(conn, "state") == "launched":
+        await call.answer("Presale già lanciato.", show_alert=True)
+        return
+    wallet = db.get_wallet(conn, call.from_user.id)
+    if not wallet:
+        await _edit(call, "Registra prima il wallet: /setwallet <pubkey>",
+                    back_to_menu())
+        return
+    treasury = await chain.balance_sol()
+    if treasury < quote["net_sol"]:
+        await _edit(call, "😕 Treasury SOL insufficiente, riprova più tardi.",
+                    back_to_menu())
+        return
+    try:
+        sig = await chain.send_sol(wallet, quote["net_sol"])
+    except Exception:
+        await _edit(call, "❌ Invio SOL fallito, riprova.", back_to_menu())
+        return
+    service.confirm_refund(conn, call.from_user.id, quote["refund_sol"],
+                           quote["fee_sol"], signature=sig)
+    await _edit(call, (
+        f"✅ <b>Rimborso completato</b>\n\n"
+        f"💸 Inviati: <b>{quote['net_sol']:.6f} SOL</b> → <code>{wallet[:6]}…{wallet[-4:]}</code>\n"
+        f"🧾 Fee: <code>{quote['fee_sol']:.6f} SOL</code>\n"
+        f"📉 Contributo residuo: <code>{quote['contribution_after']:.4f} SOL</code>"
+    ), back_to_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data == "refund:cancel")
+async def cb_refund_cancel(call: CallbackQuery, cfg):
+    PENDING_REFUNDS.pop(call.from_user.id, None)
+    await _edit(call, "❌ Rimborso annullato.", back_to_menu())
+    await call.answer()
 
 
 @router.callback_query(F.data == "launch:cancel")

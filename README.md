@@ -1,22 +1,21 @@
-# solana-curve-bot
+# Jabba — Presale Bot + Atomic Launch su pump.fun
 
-Bot Telegram minimale che gestisce una bonding curve lineare, **tutto off-chain**:
-esiste un solo indirizzo Solana (il treasury) dove arrivano i SOL; il "token"
-è un credito nel database del bot, non un asset on-chain.
+Bot Telegram che gestisce un **presale flat** (contributi in SOL, quota
+proporzionale) e lancia il token su pump.fun con un **bundle atomico Jito**:
+creazione + dev buy + distribuzione ai wallet nello stesso slot.
 
 ## Come funziona
 
-- Un solo keypair: l'**indirizzo treasury** (visibile on-chain) dove si accumulano i SOL.
-- Curva lineare: `prezzo(supply) = P0 + M * supply`.
-- **Buy**: l'utente registra il wallet con `/setwallet`, poi invia SOL al
-  treasury. Il monitor rileva il deposito, trattiene la **fee buy (0,30%)**,
-  calcola i token sul netto secondo la curva e accredita il saldo nel ledger.
-- **Sell**: `/sell <importo|%>` — il bot verifica il saldo, sottrae la
-  **fee sell (0,30%)** dai proventi, invia i SOL al wallet dell'utente e
-  azzera i token nel ledger. Le fee restano nel treasury come ricavo.
-- Nessun token SPL: nessun mint, burn, ATA. Solo SOL in ingresso, SOL in uscita.
-- Idempotenza: ogni deposito è processato una sola volta (dedup firme tx).
-- Whitelist rigida `ALLOWED_TELEGRAM_IDS`: chiunque altro viene ignorato.
+- **Presale flat**: l'utente registra il wallet (`/setwallet`) e invia SOL al
+  treasury. Il ledger registra solo i SOL versati: nessuna curva nostra,
+  nessun token off-chain — il prezzo lo decide la curva pump.fun al lancio.
+- **Rimborso libero**: `/refund` (25/50/75/100%) prima del lancio, con fee
+  `REFUND_FEE_BPS` (default 0,30%).
+- **Quota**: `/position` mostra SOL contribuiti, % del totale e token stimati
+  al lancio (matematica pump.fun deterministica).
+- **Lancio atomico**: `/launch` (admin) → bundle Jito con create + dev buy
+  (95% treasury) + distribuzione proporzionale ai SOL, stesso slot.
+- Idempotenza depositi (dedup firme), whitelist rigida, admin = primo ID.
 
 ## Attenzione
 
