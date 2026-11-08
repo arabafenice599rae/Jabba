@@ -80,7 +80,7 @@ async def cmd_info(message: Message, cfg, conn, chain):
 async def cmd_position(message: Message, cfg, conn):
     if not _guard(cfg, message.from_user.id):
         return
-    c = db.user_contribution(conn, message.from_user.id)
+    c = service.available_contribution(conn, message.from_user.id)
     raised = db.total_raised(conn)
     share = c / raised * 100 if raised > 0 else 0
     est = _est_tokens(conn, cfg, c)
@@ -246,8 +246,8 @@ async def cb_refund_amt(call: CallbackQuery, cfg, conn):
         return
     pct = int(call.data.split(":")[2])
     try:
-        quote = service.refund_quote(conn, call.from_user.id, pct / 100.0,
-                                     cfg.refund_fee_bps)
+        quote = service.reserve_refund(conn, call.from_user.id, pct / 100.0,
+                                       cfg.refund_fee_bps)
     except ValueError as e:
         await call.answer(str(e), show_alert=True)
         return
@@ -275,25 +275,29 @@ async def cb_refund_go(call: CallbackQuery, cfg, conn, chain):
         await call.answer("Quotazione scaduta, ripeti.", show_alert=True)
         return
     if db.get_meta(conn, "state") == "launched":
+        service.release_refund(conn, quote["pending_id"])
         await call.answer("Presale già lanciato.", show_alert=True)
         return
     wallet = db.get_wallet(conn, call.from_user.id)
     if not wallet:
+        service.release_refund(conn, quote["pending_id"])
         await _edit(call, "Registra prima il wallet: /setwallet <pubkey>",
                     back_to_menu())
         return
     treasury = await chain.balance_sol()
     if treasury < quote["net_sol"]:
+        service.release_refund(conn, quote["pending_id"])
         await _edit(call, "😕 Treasury SOL insufficiente, riprova più tardi.",
                     back_to_menu())
         return
     try:
         sig = await chain.send_sol(wallet, quote["net_sol"])
     except Exception:
-        await _edit(call, "❌ Invio SOL fallito, riprova.", back_to_menu())
+        service.release_refund(conn, quote["pending_id"])
+        await _edit(call, "❌ Invio SOL fallito, rimborso ri-prenotabile.",
+                    back_to_menu())
         return
-    service.confirm_refund(conn, call.from_user.id, quote["refund_sol"],
-                           quote["fee_sol"], signature=sig)
+    service.commit_refund(conn, quote["pending_id"], signature=sig)
     await _edit(call, (
         f"✅ <b>Rimborso completato</b>\n\n"
         f"💸 Inviati: <b>{quote['net_sol']:.6f} SOL</b> → <code>{wallet[:6]}…{wallet[-4:]}</code>\n"
@@ -304,8 +308,10 @@ async def cb_refund_go(call: CallbackQuery, cfg, conn, chain):
 
 
 @router.callback_query(F.data == "refund:cancel")
-async def cb_refund_cancel(call: CallbackQuery, cfg):
-    PENDING_REFUNDS.pop(call.from_user.id, None)
+async def cb_refund_cancel(call: CallbackQuery, cfg, conn):
+    quote = PENDING_REFUNDS.pop(call.from_user.id, None)
+    if quote:
+        service.release_refund(conn, quote["pending_id"])
     await _edit(call, "❌ Rimborso annullato.", back_to_menu())
     await call.answer()
 
@@ -347,3 +353,33 @@ async def cb_launch_go(call: CallbackQuery, cfg, conn, chain):
         f"Team: {report['team_tokens']:,.0f} · Dust in treasury: {report['dust_tokens']:,.0f}\n\n"
         f"I token sono nei wallet degli utenti. La curva è ora su pump.fun."
     )
+
+
+@router.message(Command("reconcile"))
+async def cmd_reconcile(message: Message, cfg, conn, chain):
+    if not _guard(cfg, message.from_user.id):
+        return
+    if message.from_user.id != cfg.allowed_ids[0]:
+        await message.answer("Solo l'amministratore.")
+        return
+    from . import service as svc
+    transfers = await chain.incoming_sol_transfers(max_signatures=50)
+    onchain = {f"{t['signature']}:{t['index']}": t["amount_sol"]
+               for t in transfers}
+    result = svc.reconcile(conn, onchain)
+    await message.answer(
+        f"🔍 <b>Riconciliazione ledger ↔ blockchain</b>\n\n"
+        f"Depositi on-chain (finalized, ultime 50 tx): <b>{len(onchain)}</b>\n"
+        f"Mancanti nel ledger: <b>{len(result['missing_in_ledger'])}</b>\n"
+        f"Firme nel ledger non viste on-chain: "
+        f"<b>{len(result['missing_onchain'])}</b>\n\n"
+        f"{'✅ Nessuna discrepanza nelle ultime 50 tx.' if not result['missing_in_ledger'] and not result['missing_onchain'] else '⚠️ Verificare le discrepanze elencate nei log.'}"
+    )
+    if result["missing_in_ledger"]:
+        for sig, amount in list(result["missing_in_ledger"].items())[:10]:
+            message_text = f"⚠️ manca nel ledger: {sig[:16]}… ({amount} SOL)"
+    if result["missing_onchain"]:
+        await message.answer(
+            "⚠️ firme nel ledger non trovate on-chain:\n" +
+            "\n".join(s[:24] + "…" for s in result["missing_onchain"][:10])
+        )

@@ -47,40 +47,44 @@ class Chain:
         return str(resp.value)
 
     async def incoming_sol_transfers(self, max_signatures: int = 25) -> list[dict]:
-        """SOL transfers TO the treasury address. Returns dicts with
-        signature, slot, sender, amount_sol."""
+        """FINALIZED SOL transfers TO the treasury. One entry per
+        incoming transfer: dicts with signature, index, slot, sender,
+        amount_sol. A tx with multiple transfers yields many entries."""
+        from solana.rpc.core import Finalized
+
         sigs = await self.client.get_signatures_for_address(
-            self.keypair.pubkey(), limit=max_signatures
+            self.keypair.pubkey(), limit=max_signatures,
+            commitment=Finalized,
         )
         out = []
         for s in sigs.value:
             if s.err:
                 continue
             tx = await self.client.get_transaction(
-                s.signature, encoding="base64")
+                s.signature, encoding="base64", commitment=Finalized)
             if tx.value is None:
                 continue
-            transfer = self._find_incoming_transfer(tx.value)
-            if transfer is not None:
+            for i, transfer in enumerate(
+                    self._find_incoming_transfers(tx.value)):
                 out.append({
                     "signature": str(s.signature),
+                    "index": i,
                     "slot": s.slot,
                     "sender": transfer["sender"],
                     "amount_sol": transfer["amount_sol"],
                 })
         return out
 
-    def _find_incoming_transfer(self, tx_value) -> dict | None:
-        from solders.pubkey import Pubkey
-
+    def _find_incoming_transfers(self, tx_value) -> list[dict]:
+        """ALL incoming SOL transfers in a finalized tx (a tx may contain
+        more than one transfer to us)."""
         try:
-            # base64 encoding: compiled tx lives at .transaction.transaction
             msg = tx_value.transaction.transaction.message
             keys = msg.account_keys
             me = self.keypair.pubkey()
+            found = []
             for instr in msg.instructions:
                 data = bytes(instr.data)
-                # System program Transfer: instruction id 2 (little-endian u32)
                 if len(data) < 12 or data[:4] != b"\x02\x00\x00\x00":
                     continue
                 lamports = int.from_bytes(data[4:12], "little")
@@ -89,9 +93,11 @@ class Chain:
                 src = keys[instr.accounts[0]]
                 dst = keys[instr.accounts[1]]
                 if dst == me:
-                    return {"sender": str(src), "amount_sol": lamports / LAMPORTS}
+                    found.append({"sender": str(src),
+                                  "amount_sol": lamports / LAMPORTS})
+            return found
         except Exception:
-            return None
+            return []
         return None
 
     # --- launch support (pump.fun) ---

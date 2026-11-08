@@ -16,30 +16,66 @@ def record_deposit(conn, telegram_id: int, amount_sol: float,
               signature=signature)
 
 
-def refund_quote(conn, telegram_id: int, fraction: float,
-                 refund_fee_bps: int) -> dict:
-    """Quote a partial/full refund. fraction in [0,1]. Returns dict with
-    contribution_after, refund_sol, fee_sol, net_sol. Raises ValueError."""
-    contribution = db.user_contribution(conn, telegram_id)
-    refund_sol = contribution * fraction
+def available_contribution(conn, telegram_id: int) -> float:
+    """Contribution minus outstanding refund reservations."""
+    return db.user_contribution(conn, telegram_id) - \
+        db.pending_refund_total(conn, telegram_id)
+
+
+def reserve_refund(conn, telegram_id: int, fraction: float,
+                   refund_fee_bps: int) -> dict:
+    """Atomically reserve a refund (concurrency-safe): the reserved amount
+    is deducted from the available contribution until committed/released.
+    The check-and-insert sequence is synchronous (no awaits between the
+    availability read and the insert), so it is atomic within the single
+    asyncio process; the pending row makes the reservation durable.
+    Returns dict with pending_id, refund_sol, fee_sol, net_sol,
+    contribution_after. Raises ValueError if not enough available."""
+    available = available_contribution(conn, telegram_id)
+    refund_sol = available * fraction
     if refund_sol <= 0:
         raise ValueError("nessun contributo da rimborsare")
     fee = refund_sol * refund_fee_bps / 10_000.0
     net = refund_sol - fee
     if net <= 0:
         raise ValueError("importo troppo piccolo")
+    pending_id = db.insert_pending_refund(conn, telegram_id,
+                                          refund_sol, fee)
     return {
+        "pending_id": pending_id,
         "refund_sol": refund_sol,
         "fee_sol": fee,
         "net_sol": net,
-        "contribution_after": contribution - refund_sol,
+        "contribution_after": available - refund_sol,
     }
 
 
-def confirm_refund(conn, telegram_id: int, refund_sol: float,
-                   fee_sol: float, signature: str | None = None) -> None:
-    db.record(conn, telegram_id, "refund", refund_sol, fee_sol,
-              signature=signature)
+def commit_refund(conn, pending_id: int, signature: str | None = None) -> dict:
+    """Convert a reservation into a ledger refund record (atomic)."""
+    pending = db.get_pending_refund(conn, pending_id)
+    if pending is None:
+        raise ValueError("rimborso prenotato non trovato")
+    db.record(conn, pending["telegram_id"], "refund",
+              pending["amount_sol"], pending["fee_sol"], signature=signature)
+    db.release_pending_refund(conn, pending_id)
+    return pending
+
+
+def release_refund(conn, pending_id: int) -> None:
+    db.release_pending_refund(conn, pending_id)
+
+
+def reconcile(conn, onchain_deposits: dict[str, float]) -> dict:
+    """Compare ledger deposits (by tx signature) with on-chain incoming
+    transfers. Returns {'missing_in_ledger': {sig: amount},
+    'missing_onchain': [sigs]}."""
+    ledger_sigs = db.ledger_deposit_sigs(conn)
+    onchain_sigs = set(onchain_deposits)
+    return {
+        "missing_in_ledger": {s: onchain_deposits[s]
+                              for s in onchain_sigs - ledger_sigs},
+        "missing_onchain": sorted(ledger_sigs - onchain_sigs),
+    }
 
 
 def shares(conn) -> dict[int, float]:

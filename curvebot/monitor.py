@@ -55,6 +55,8 @@ class DepositMonitor:
         if amount_sol < self.cfg.min_deposit_sol:
             log.info("deposit below minimum from %s, ignored", sender)
             return
+        key = f"{transfer['signature']}:{transfer['index']}"
         service.record_deposit(conn, telegram_id, amount_sol,
-                               signature=transfer["signature"])
-        log.info("deposit: user=%s sol=%.6f", telegram_id, amount_sol)
+                               signature=key)
+        log.info("deposit: user=%s sol=%.6f (%s)", telegram_id, amount_sol,
+                 key[:16])

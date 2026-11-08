@@ -51,8 +51,13 @@ FASE 3 — MERCATO (automatico)
 - **Limite atomico rigido**: massimo **36 partecipanti** (chunk da 9
   misurati sui 1232 byte/tx, 5 tx per bundle); oltre, il lancio è
   rifiutato — più bundle NON sono atomici tra loro
+- **RC1 — idempotenza e concorrenza**: accredito solo a commitment
+  finalized; dedup per `firma:indice` (multi-transfer per tx gestiti);
+  rimborsi come transizione atomica prenota→invia→commit (due richieste
+  concorrenti non sovraccopano lo stesso deposito); `/reconcile` (admin)
+  confronta ledger e blockchain
 - Whitelist rigida `ALLOWED_TELEGRAM_IDS` (admin = primo ID), chiave
-  privata solo da file, idempotenza depositi via dedup firme
+  privata solo da file
 
 ## Setup
 

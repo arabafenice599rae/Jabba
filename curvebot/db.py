@@ -32,6 +32,13 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS pending_refunds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    amount_sol REAL NOT NULL,
+    fee_sol REAL NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS processed_sigs (
     signature TEXT PRIMARY KEY,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -134,3 +141,43 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
     row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
+
+
+def insert_pending_refund(conn: sqlite3.Connection, telegram_id: int,
+                           amount_sol: float, fee_sol: float) -> int:
+    cur = conn.execute(
+        "INSERT INTO pending_refunds (telegram_id, amount_sol, fee_sol) "
+        "VALUES (?, ?, ?)",
+        (telegram_id, amount_sol, fee_sol),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def pending_refund_total(conn: sqlite3.Connection, telegram_id: int) -> float:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount_sol), 0) AS t FROM pending_refunds "
+        "WHERE telegram_id = ?",
+        (telegram_id,),
+    ).fetchone()
+    return row["t"]
+
+
+def release_pending_refund(conn: sqlite3.Connection, refund_id: int) -> None:
+    conn.execute("DELETE FROM pending_refunds WHERE id = ?", (refund_id,))
+    conn.commit()
+
+
+def get_pending_refund(conn: sqlite3.Connection, refund_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM pending_refunds WHERE id = ?", (refund_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def ledger_deposit_sigs(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute(
+        "SELECT signature FROM ledger WHERE kind = 'deposit' "
+        "AND signature IS NOT NULL"
+    ).fetchall()
+    return {r["signature"] for r in rows}

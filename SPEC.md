@@ -78,7 +78,30 @@ curvebot/
 3. `/position` → SOL contribuiti, % del presale, token stimati al lancio
 4. `/refund` → bottoni % → quotazione con fee → conferma ✅/❌ → SOL indietro
 
-### 3.3 Sicurezza
+### 3.3 RC1 — Idempotenza, concorrenza, riconciliazione
+
+**Depositi (anti doppio-accredito)**:
+- Accredito SOLO a commitment **finalized** (getSignaturesForAddress +
+  getTransaction con Finalized): niente accrediti provvisori
+- Dedup per chiave `firma:indice` — una tx con più transfer verso il
+  treasury produce più accrediti distinti, ciascuno idempotente
+- Riavvio durante il polling: la dedup su DB copre la rielaborazione
+- Tx fallite (s.err) scartate; tx non finalizzate non ancora visibili
+
+**Rimborsi (transizione atomica)**:
+1. `reserve_refund`: prenota l'importo (riga `pending_refunds`), scala
+   subito dal disponibile — due richieste concorrenti non possono
+   sovraccoprire lo stesso deposito (testato)
+2. invio SOL
+3. `commit_refund`: converte la prenotazione in record ledger con firma
+4. su annullamento/errore/timeout: `release_refund` libera la prenotazione
+   (nessun SOL inviato = nessun addebito ledger)
+
+**Riconciliazione**: `/reconcile` (admin) confronta i depositi del ledger
+con i transfer on-chain finalized (ultime 50 tx) per firma:indice e
+riporta le discrepanze in entrambe le direzioni.
+
+### 3.4 Sicurezza
 
 - Whitelist rigida `ALLOWED_TELEGRAM_IDS` (il bot non parte senza)
 - Il primo ID della whitelist è l'**admin** (unico che può `/launch`)
