@@ -25,7 +25,7 @@ def render_curve_png(price_base_sol: float, slope_sol: float,
     fig.patch.set_facecolor("#0e1117")
     ax.set_facecolor("#0e1117")
 
-    ax.plot(xs, ys, color="#14f195", linewidth=2.4, label="Prezzo di acquisto")
+    ax.plot(xs, ys, color="#14f195", linewidth=2.4, label="Buy price")
     ax.fill_between(xs, ys, color="#14f195", alpha=0.12)
 
     if supply_tokens > 0:
@@ -33,19 +33,19 @@ def render_curve_png(price_base_sol: float, slope_sol: float,
         ax.axvline(supply_tokens, color="#9945ff", linewidth=1.2, linestyle="--", alpha=0.8)
         ax.plot([supply_tokens], [price_now], "o", color="#f4ce4a", markersize=9, zorder=5)
         ax.annotate(
-            f"  supply attuale\n  {supply_tokens:,.0f} tok\n  {price_now:.10f} SOL",
+            f"  current supply\n  {supply_tokens:,.0f} tok\n  {price_now:.10f} SOL",
             xy=(supply_tokens, price_now),
             xytext=(min(supply_tokens + x_max * 0.06, x_max * 0.64), price_now * 0.5),
             color="#f4ce4a", fontsize=9,
         )
     else:
-        ax.annotate("curva vergine\n(nessun token emesso)", xy=(x_max * 0.55, ys[-1] * 0.35),
+        ax.annotate("virgin curve\n(no tokens issued)", xy=(x_max * 0.55, ys[-1] * 0.35),
                     color="#8b949e", fontsize=10)
 
-    ax.set_title("Bonding curve  ·  prezzo (SOL) vs supply (token)",
+    ax.set_title("Bonding curve  ·  price (SOL) vs supply (token)",
                  color="#e6edf3", fontsize=12, pad=12)
     ax.set_xlabel("Supply (token)", color="#8b949e")
-    ax.set_ylabel("Prezzo (SOL)", color="#8b949e")
+    ax.set_ylabel("Price (SOL)", color="#8b949e")
     ax.tick_params(colors="#8b949e")
     for spine in ax.spines.values():
         spine.set_color("#30363d")
