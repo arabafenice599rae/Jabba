@@ -75,6 +75,44 @@ class Chain:
                 })
         return out
 
+    async def transfers_to_wallet(self, wallet: str,
+                                 max_signatures: int = 25) -> list[dict]:
+        """FINALIZED SOL transfers from the treasury TO `wallet`.
+        Used to resolve refunds with uncertain outcome."""
+        from solana.rpc.core import Finalized
+        from solders.pubkey import Pubkey
+
+        target = Pubkey.from_string(wallet)
+        me = self.keypair.pubkey()
+        sigs = await self.client.get_signatures_for_address(
+            target, limit=max_signatures, commitment=Finalized)
+        out = []
+        for s in sigs.value:
+            if s.err:
+                continue
+            tx = await self.client.get_transaction(
+                s.signature, encoding="base64", commitment=Finalized)
+            if tx.value is None:
+                continue
+            try:
+                msg = tx.value.transaction.transaction.message
+                keys = msg.account_keys
+                for instr in msg.instructions:
+                    data = bytes(instr.data)
+                    if len(data) < 12 or data[:4] != b"\x02\x00\x00\x00":
+                        continue
+                    lamports = int.from_bytes(data[4:12], "little")
+                    if lamports <= 0:
+                        continue
+                    src = keys[instr.accounts[0]]
+                    dst = keys[instr.accounts[1]]
+                    if src == me and dst == target:
+                        out.append({"signature": str(s.signature),
+                                    "amount_sol": lamports / LAMPORTS})
+            except Exception:
+                continue
+        return out
+
     def _find_incoming_transfers(self, tx_value) -> list[dict]:
         """ALL incoming SOL transfers in a finalized tx (a tx may contain
         more than one transfer to us)."""

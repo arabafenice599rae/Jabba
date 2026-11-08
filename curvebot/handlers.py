@@ -244,6 +244,7 @@ async def cb_refund_amt(call: CallbackQuery, cfg, conn):
         await call.answer("Presale già lanciato: rimborsi chiusi.",
                           show_alert=True)
         return
+    await service.resolve_unknown_refunds(conn, chain)
     pct = int(call.data.split(":")[2])
     try:
         quote = service.reserve_refund(conn, call.from_user.id, pct / 100.0,
@@ -293,8 +294,13 @@ async def cb_refund_go(call: CallbackQuery, cfg, conn, chain):
     try:
         sig = await chain.send_sol(wallet, quote["net_sol"])
     except Exception:
-        service.release_refund(conn, quote["pending_id"])
-        await _edit(call, "❌ Invio SOL fallito, rimborso ri-prenotabile.",
+        # UNCERTAIN outcome: keep the reservation held, mark unknown —
+        # the tx may have landed despite the lost RPC response
+        service.mark_refund_unknown(conn, quote["pending_id"])
+        await _edit(call,
+                    "⚠️ Esito invio incerto: il rimborso è in stato "
+                    "<b>unknown</b> e resta trattenuto. Verrà riconciliato "
+                    "automaticamente col prossimo tentativo o via /reconcile.",
                     back_to_menu())
         return
     service.commit_refund(conn, quote["pending_id"], signature=sig)
@@ -367,19 +373,31 @@ async def cmd_reconcile(message: Message, cfg, conn, chain):
     onchain = {f"{t['signature']}:{t['index']}": t["amount_sol"]
                for t in transfers}
     result = svc.reconcile(conn, onchain)
-    await message.answer(
-        f"🔍 <b>Riconciliazione ledger ↔ blockchain</b>\n\n"
-        f"Depositi on-chain (finalized, ultime 50 tx): <b>{len(onchain)}</b>\n"
-        f"Mancanti nel ledger: <b>{len(result['missing_in_ledger'])}</b>\n"
-        f"Firme nel ledger non viste on-chain: "
-        f"<b>{len(result['missing_onchain'])}</b>\n\n"
-        f"{'✅ Nessuna discrepanza nelle ultime 50 tx.' if not result['missing_in_ledger'] and not result['missing_onchain'] else '⚠️ Verificare le discrepanze elencate nei log.'}"
-    )
-    if result["missing_in_ledger"]:
-        for sig, amount in list(result["missing_in_ledger"].items())[:10]:
-            message_text = f"⚠️ manca nel ledger: {sig[:16]}… ({amount} SOL)"
-    if result["missing_onchain"]:
-        await message.answer(
-            "⚠️ firme nel ledger non trovate on-chain:\n" +
-            "\n".join(s[:24] + "…" for s in result["missing_onchain"][:10])
-        )
+    resolutions = await svc.resolve_unknown_refunds(conn, chain)
+    lines = [
+        f"🔍 <b>Riconciliazione ledger ↔ blockchain</b>",
+        f"(finalized, ultime 50 tx; nessuna correzione automatica)",
+        "",
+        f"Depositi on-chain: <b>{len(onchain)}</b>",
+        f"• mancati nel ledger: <b>{len(result['missing_in_ledger'])}</b>",
+        f"• duplicati nel ledger: <b>{len(result['duplicate_ledger'])}</b>",
+        f"• importi diversi: <b>{len(result['amount_mismatch'])}</b>",
+        f"• non verificabili (fuori finestra): "
+        f"<b>{len(result['unverifiable_onchain'])}</b>",
+        f"• rimborsi unknown trattenuti: "
+        f"<b>{len(result['unknown_refunds'])}</b>",
+        f"• rimborsi senza firma: "
+        f"<b>{len(result['refund_sigs_unresolved'])}</b>",
+    ]
+    if resolutions:
+        lines.append("")
+        lines.append("Risoluzioni unknown eseguite: " + ", ".join(
+            f"#{r['id']}→{r['outcome']}" for r in resolutions))
+    clean = not any(result[k] for k in
+                    ("missing_in_ledger", "duplicate_ledger",
+                     "amount_mismatch", "unknown_refunds",
+                     "refund_sigs_unresolved"))
+    lines.append("")
+    lines.append("✅ Nessuna discrepanza." if clean else
+                 "⚠️ Discrepanze sopra: correzione SOLO manuale.")
+    await message.answer("\n".join(lines))

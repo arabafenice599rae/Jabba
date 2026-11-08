@@ -97,9 +97,25 @@ curvebot/
 4. su annullamento/errore/timeout: `release_refund` libera la prenotazione
    (nessun SOL inviato = nessun addebito ledger)
 
-**Riconciliazione**: `/reconcile` (admin) confronta i depositi del ledger
-con i transfer on-chain finalized (ultime 50 tx) per firma:indice e
-riporta le discrepanze in entrambe le direzioni.
+**Riconciliazione a sei categorie** (`/reconcile`, admin — SOLO report,
+mai correzione automatica): deposito mancante nel ledger; duplicato nel
+ledger; importo differente; non verificabile (fuori finestra 50 tx);
+rimborsi unknown trattenuti; rimborsi senza firma. La risoluzione degli
+unknown avviene via `resolve_unknown_refunds` (match dell'importo tra i
+transfer finalized treasury→wallet; grace period 600s prima del release).
+
+**RC2 — Hardening**:
+- SQLite: `isolation_level=None` (autocommit) + transazioni esplicite
+  `BEGIN IMMEDIATE` per reserve_refund (check saldo + insert atomici,
+  anche tra processi/connessioni diversi — testato)
+- Rimborsi a esito incerto: su errore/timeout dell'invio SOL la
+  prenotazione NON viene liberata ma passa a stato `unknown`; nuovi
+  rimborsi possibili solo dopo riconciliazione on-chain (commit se il
+  transfer risulta landed, release dopo grace period)
+- Lock di lancio persistente: `acquire_launch_lock` (check-and-set
+  atomico in tabella meta) impedisce due `/launch` concorrenti; su
+  fallimento DEFINITIVO viene rilasciato, su esito SCONOSCIUTO resta
+  attivo (intervento manuale obbligatorio)
 
 ### 3.4 Sicurezza
 

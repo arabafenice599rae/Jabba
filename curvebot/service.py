@@ -26,21 +26,29 @@ def reserve_refund(conn, telegram_id: int, fraction: float,
                    refund_fee_bps: int) -> dict:
     """Atomically reserve a refund (concurrency-safe): the reserved amount
     is deducted from the available contribution until committed/released.
-    The check-and-insert sequence is synchronous (no awaits between the
-    availability read and the insert), so it is atomic within the single
-    asyncio process; the pending row makes the reservation durable.
+    Check-and-insert run in ONE explicit BEGIN IMMEDIATE transaction:
+    atomic even across multiple connections/processes.
     Returns dict with pending_id, refund_sol, fee_sol, net_sol,
     contribution_after. Raises ValueError if not enough available."""
-    available = available_contribution(conn, telegram_id)
-    refund_sol = available * fraction
-    if refund_sol <= 0:
-        raise ValueError("nessun contributo da rimborsare")
-    fee = refund_sol * refund_fee_bps / 10_000.0
-    net = refund_sol - fee
-    if net <= 0:
-        raise ValueError("importo troppo piccolo")
-    pending_id = db.insert_pending_refund(conn, telegram_id,
-                                          refund_sol, fee)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        available = available_contribution(conn, telegram_id)
+        refund_sol = available * fraction
+        if refund_sol <= 0:
+            raise ValueError("nessun contributo da rimborsare")
+        fee = refund_sol * refund_fee_bps / 10_000.0
+        net = refund_sol - fee
+        if net <= 0:
+            raise ValueError("importo troppo piccolo")
+        pending_id = db.insert_pending_refund(conn, telegram_id,
+                                              refund_sol, fee)
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
     return {
         "pending_id": pending_id,
         "refund_sol": refund_sol,
@@ -65,16 +73,85 @@ def release_refund(conn, pending_id: int) -> None:
     db.release_pending_refund(conn, pending_id)
 
 
+def mark_refund_unknown(conn, pending_id: int) -> None:
+    """Uncertain outcome (e.g. RPC timeout after submission): the
+    reservation STAYS HELD and the refund enters 'unknown' state. A new
+    refund is only possible after reconciliation resolves it."""
+    db.set_refund_status(conn, pending_id, "unknown")
+    conn.commit()
+
+
+async def resolve_unknown_refunds(conn, chain, grace_seconds: int = 600
+                                   ) -> list[dict]:
+    """Resolve 'unknown' refunds against the chain: if a matching SOL
+    transfer from the treasury to the user's wallet is found (finalized),
+    commit the refund with its signature; if none is found after the
+    grace period, release the reservation. Returns resolution log."""
+    resolutions = []
+    unknowns = db.list_unknown_refunds(conn)
+    for pending in unknowns:
+        wallet = db.get_wallet(conn, pending["telegram_id"])
+        net = pending["amount_sol"] - pending["fee_sol"]
+        landed = None
+        if wallet:
+            transfers = await chain.transfers_to_wallet(wallet)
+            matches = [t for t in transfers
+                       if abs(t["amount_sol"] - net) < 1e-9]
+            if matches:
+                landed = matches[0]
+        if landed is not None:
+            db.record(conn, pending["telegram_id"], "refund",
+                      pending["amount_sol"], pending["fee_sol"],
+                      signature=landed["signature"])
+            db.release_pending_refund(conn, pending["id"])
+            conn.commit()
+            resolutions.append({"id": pending["id"], "outcome": "committed",
+                                "signature": landed["signature"]})
+        else:
+            import time
+            from datetime import datetime, timezone
+            try:
+                created = datetime.fromisoformat(pending["created_at"])
+                age = (datetime.now(timezone.utc) - created).total_seconds()
+            except Exception:
+                age = grace_seconds + 1
+            if age > grace_seconds:
+                db.release_pending_refund(conn, pending["id"])
+                conn.commit()
+                resolutions.append({"id": pending["id"],
+                                    "outcome": "released"})
+    return resolutions
+
+
 def reconcile(conn, onchain_deposits: dict[str, float]) -> dict:
-    """Compare ledger deposits (by tx signature) with on-chain incoming
-    transfers. Returns {'missing_in_ledger': {sig: amount},
-    'missing_onchain': [sigs]}."""
-    ledger_sigs = db.ledger_deposit_sigs(conn)
-    onchain_sigs = set(onchain_deposits)
+    """Six-category ledger <-> chain reconciliation. NEVER auto-corrects:
+    reports only; fixes require a controlled procedure.
+
+    Categories:
+    - missing_in_ledger: finalized on-chain deposit not credited
+    - unverifiable_onchain: ledger sig not in the (limited) on-chain
+      window — cannot be verified, NOT declared missing
+    - amount_mismatch: same sig, different amount
+    - duplicate_ledger: same sig credited more than once
+    - unknown_refunds: refunds with uncertain send outcome (held)
+    - refund_sigs_unresolved: ledger refunds without signature
+    """
+    ledger = db.ledger_deposits(conn)
+    onchain = onchain_deposits
+    ledger_sigs = set(ledger)
+    onchain_sigs = set(onchain)
+    common = ledger_sigs & onchain_sigs
     return {
-        "missing_in_ledger": {s: onchain_deposits[s]
-                              for s in onchain_sigs - ledger_sigs},
-        "missing_onchain": sorted(ledger_sigs - onchain_sigs),
+        "missing_in_ledger": {s: onchain[s] for s in onchain_sigs - ledger_sigs},
+        "unverifiable_onchain": sorted(ledger_sigs - onchain_sigs),
+        "amount_mismatch": {s: (ledger[s], onchain[s]) for s in common
+                            if abs(ledger[s] - onchain[s]) > 1e-9},
+        "duplicate_ledger": db.duplicate_deposit_sigs(conn),
+        "unknown_refunds": [r["id"] for r in db.list_unknown_refunds(conn)],
+        "refund_sigs_unresolved": [
+            r["id"] for r in conn.execute(
+                "SELECT id FROM ledger WHERE kind = 'refund' "
+                "AND signature IS NULL").fetchall()],
     }
 
 

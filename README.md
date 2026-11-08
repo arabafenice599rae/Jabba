@@ -56,6 +56,12 @@ FASE 3 — MERCATO (automatico)
   rimborsi come transizione atomica prenota→invia→commit (due richieste
   concorrenti non sovraccopano lo stesso deposito); `/reconcile` (admin)
   confronta ledger e blockchain
+- **RC2 — hardening**: riserve in transazioni `BEGIN IMMEDIATE` esplicite
+  (atomiche anche tra processi); rimborsi a esito incerto → stato
+  `unknown` con prenotazione trattenuta e riconciliazione on-chain prima
+  di nuovi rimborsi; riconciliazione a sei categorie senza auto-correzione;
+  lock di lancio persistente (due /launch non possono creare due token,
+  lock mantenuto su esito sconosciuto)
 - Whitelist rigida `ALLOWED_TELEGRAM_IDS` (admin = primo ID), chiave
   privata solo da file
 
