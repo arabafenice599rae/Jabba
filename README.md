@@ -76,27 +76,6 @@ quotazione con fee → conferma con due bottoni (✅/❌).
 `/chart` (o il bottone 📈) invia il grafico PNG della curva con il
 supply attuale segnato.
 
-## Mini App (simulatore interattivo)
-
-`miniapp/index.html` è una Telegram Mini App self-contained (nessun backend,
-nessun build): grafico della curva esplorabile al tocco + simulatore
-buy/sell con fee in tempo reale.
-
-### Hosting (GitHub Pages)
-
-1. Fork/clona il repo e attiva Pages: **Settings → Pages → Deploy from a
-   branch → main → / (root)** oppure metti `miniapp/` in una cartella
-   `docs/` e seleziona quella.
-2. L'URL sarà tipo `https://<utente>.github.io/jabba/miniapp/`
-   (o `/jabba/` se pubblichi la root).
-3. Inseriscilo in `WEBAPP_URL` nel `.env` del bot: apparirà il bottone
-   **🧮 Simulatore** nel menu, che apre la Mini App dentro Telegram.
-4. Opzionale: da BotFather, `/setmenubutton` per avere la Mini App anche
-   nel menu del bot.
-
-La app riceve i parametri della curva (P0, slope, supply, fee) via query
-string quando il bot la apre: i dati sono sempre quelli attuali.
-
 ## Comandi
 
 | Comando | Effetto |

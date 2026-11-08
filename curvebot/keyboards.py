@@ -2,24 +2,19 @@
 
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def _btn(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
 
 
-def main_menu(webapp_url: str = "") -> InlineKeyboardMarkup:
-    rows = [
+def main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
         [_btn("💰 Come comprare", "menu:howbuy"), _btn("📤 Vendi", "sell:open")],
         [_btn("📊 Posizione", "menu:position"), _btn("📈 Curva", "menu:chart")],
         [_btn("ℹ️ Info", "menu:info")],
-    ]
-    if webapp_url:
-        rows.insert(2, [InlineKeyboardButton(
-            text="🧮 Simulatore", web_app=WebAppInfo(url=webapp_url)
-        )])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    ])
 
 
 def sell_amounts() -> InlineKeyboardMarkup:

@@ -21,6 +21,5 @@ class Config:
     allowed_ids: list[int] = field(default_factory=lambda: [
         int(x) for x in _env("ALLOWED_TELEGRAM_IDS").split(",") if x.strip()
     ])
-    webapp_url: str = field(default_factory=lambda: _env("WEBAPP_URL", ""))
     min_deposit_sol: float = field(default_factory=lambda: float(_env("MIN_DEPOSIT_SOL", "0.01")))
     poll_interval_s: float = field(default_factory=lambda: float(_env("POLL_INTERVAL_S", "5")))
