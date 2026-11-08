@@ -18,6 +18,18 @@ class Config:
     buy_fee_bps: int = field(default_factory=lambda: int(_env("BUY_FEE_BPS", "30")))
     sell_fee_bps: int = field(default_factory=lambda: int(_env("SELL_FEE_BPS", "30")))
 
+    token_name: str = field(default_factory=lambda: _env("TOKEN_NAME", ""))
+    token_symbol: str = field(default_factory=lambda: _env("TOKEN_SYMBOL", ""))
+    token_description: str = field(default_factory=lambda: _env("TOKEN_DESCRIPTION", ""))
+    token_image_path: str = field(default_factory=lambda: _env("TOKEN_IMAGE_PATH", "token.png"))
+    token_twitter: str = field(default_factory=lambda: _env("TOKEN_TWITTER", ""))
+    token_telegram: str = field(default_factory=lambda: _env("TOKEN_TELEGRAM", ""))
+    token_website: str = field(default_factory=lambda: _env("TOKEN_WEBSITE", ""))
+    dev_buy_percent: float = field(default_factory=lambda: float(_env("DEV_BUY_PERCENT", "95")))
+    team_share_bps: int = field(default_factory=lambda: int(_env("TEAM_SHARE_BPS", "500")))
+    launch_slippage: float = field(default_factory=lambda: float(_env("LAUNCH_SLIPPAGE", "10")))
+    launch_priority_fee: float = field(default_factory=lambda: float(_env("LAUNCH_PRIORITY_FEE", "0.0005")))
+
     allowed_ids: list[int] = field(default_factory=lambda: [
         int(x) for x in _env("ALLOWED_TELEGRAM_IDS").split(",") if x.strip()
     ])

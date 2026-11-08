@@ -76,6 +76,24 @@ quotazione con fee → conferma con due bottoni (✅/❌).
 `/chart` (o il bottone 📈) invia il grafico PNG della curva con il
 supply attuale segnato.
 
+## Lancio su pump.fun (presale → curva → pool)
+
+Quando il presale è pronto, l'admin lancia con `/launch`:
+
+1. **Creazione** del token su pump.fun via PumpPortal local API
+   (firma client-side: le chiavi non lasciano mai il bot)
+2. **Dev buy** col SOL del treasury (`DEV_BUY_PERCENT`, default 95%)
+   — acquisto al bottom della curva
+3. **Distribuzione immediata** ai wallet registrati, in proporzione alle
+   posizioni del presale (`TEAM_SHARE_BPS` al team, default 5%)
+   — il treasury detiene i token solo per pochi secondi
+4. Da lì la curva vive su pump.fun: alla graduazione (~85 SOL) pump.fun
+   crea la pool su PumpSwap e Jupiter la indicizza, automaticamente
+
+⚠️ pump.fun è solo mainnet: il primo lancio si collauda con cifre piccole.
+Distribuire subito è importante: screener come trench.bot/GMGN marchiano
+i token con supply concentrato nel wallet del dev.
+
 ## Comandi
 
 | Comando | Effetto |
@@ -87,3 +105,4 @@ supply attuale segnato.
 | `/position` | token posseduti e valore netto se vendi ora |
 | `/chart` `/curva` | grafico PNG della curva |
 | `/sell` | apre il menu vendita a bottoni |
+| `/launch` | (solo admin) lancia il presale su pump.fun |

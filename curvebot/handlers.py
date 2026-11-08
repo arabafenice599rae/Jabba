@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from . import db, service
 from .chart import render_curve_png
@@ -284,3 +284,78 @@ async def cb_sell_cancel(call: CallbackQuery, cfg):
     PENDING_SELLS.pop(call.from_user.id, None)
     await _edit(call, "❌ Vendita annullata.", back_to_menu())
     await call.answer()
+
+
+@router.message(Command("launch"))
+async def cmd_launch(message: Message, cfg, conn):
+    if not _guard(cfg, message.from_user.id):
+        return
+    admin_id = cfg.allowed_ids[0]
+    if message.from_user.id != admin_id:
+        await message.answer("Solo l'amministratore può lanciare.")
+        return
+    if db.get_meta(conn, "state") == "launched":
+        mint = db.get_meta(conn, "mint")
+        await message.answer(f"Presale già lanciato: pump.fun/coin/{mint}")
+        return
+    if not cfg.token_name or not cfg.token_symbol:
+        await message.answer("Configura TOKEN_NAME e TOKEN_SYMBOL nel .env.")
+        return
+    positions = {
+        row["telegram_id"]: db.user_position(conn, row["telegram_id"])
+        for row in conn.execute("SELECT DISTINCT telegram_id FROM ledger")
+    }
+    positions = {u: p for u, p in positions.items() if p > 0}
+    if not positions:
+        await message.answer("Nessuna posizione nel presale, niente da lanciare.")
+        return
+    await message.answer(
+        f"🚀 <b>LANCIO SU PUMP.FUN</b>\n\n"
+        f"Token: <b>{cfg.token_name}</b> (${cfg.token_symbol})\n"
+        f"Partecipanti: <b>{len(positions)}</b>\n"
+        f"Dev buy: <b>{cfg.dev_buy_percent}%</b> del treasury\n"
+        f"Quota team: <b>{cfg.team_share_bps / 100:.2f}%</b> (il resto agli utenti)\n\n"
+        f"⚠️ Irreversibile, su mainnet. Confermi?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🚀 LANCIA ORA", callback_data="launch:go"),
+            InlineKeyboardButton(text="❌ Annulla", callback_data="launch:cancel"),
+        ]]),
+    )
+
+
+@router.callback_query(F.data == "launch:cancel")
+async def cb_launch_cancel(call: CallbackQuery, cfg):
+    if not _guard(cfg, call.from_user.id):
+        return await call.answer()
+    await _edit(call, "❌ Lancio annullato.")
+    await call.answer()
+
+
+@router.callback_query(F.data == "launch:go")
+async def cb_launch_go(call: CallbackQuery, cfg, conn, chain):
+    if not _guard(cfg, call.from_user.id):
+        return await call.answer()
+    if call.from_user.id != cfg.allowed_ids[0]:
+        return await call.answer("Solo l'admin.", show_alert=True)
+    if db.get_meta(conn, "state") == "launched":
+        return await call.answer("Già lanciato.", show_alert=True)
+    await call.answer("Lancio in corso…")
+    import aiohttp
+
+    from .launch import run_launch
+    async with aiohttp.ClientSession() as http:
+        try:
+            report = await run_launch(chain, cfg, conn, http)
+        except Exception as e:
+            await call.message.answer(f"❌ Lancio fallito: {e}")
+            return
+    await call.message.answer(
+        f"🚀 <b>LANCIATO!</b>\n\n"
+        f"🪙 <code>{report['mint']}</code>\n"
+        f"🔗 pump.fun/coin/{report['mint']}\n\n"
+        f"Dev buy: {report['dev_buy_sol']:.4f} SOL\n"
+        f"Token comprati: {report['tokens_bought']:,.0f}\n"
+        f"Distribuiti: {report['distributed']:,.0f} a {report['wallets']} wallet\n"
+        f"Team: {report['team_tokens']:,.0f}\n\n"
+        f"I token sono nei wallet degli utenti. La curva è ora su pump.fun."
+    )

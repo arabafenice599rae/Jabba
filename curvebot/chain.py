@@ -87,3 +87,52 @@ class Chain:
         except Exception:
             return None
         return None
+
+    # --- launch support (pump.fun) ---
+
+    async def sign_send_b58(self, tx_b58: str, extra_signers=None) -> str:
+        """Sign a base58 PumpPortal transaction and send it via our RPC."""
+        import base64
+
+        import base58
+        from solders.transaction import VersionedTransaction
+
+        raw = base58.b58decode(tx_b58)
+        txn = VersionedTransaction.from_bytes(raw)
+        signers = [self.keypair] + list(extra_signers or [])
+        txn = VersionedTransaction(txn.message, signers)
+        resp = await self.client.send_transaction(txn)
+        return str(resp.value)
+
+    async def token_balance(self, mint: str) -> float:
+        """Token balance of the treasury's ATA for `mint` (ui units)."""
+        from spl.token.async_client import AsyncToken
+        from spl.token.constants import TOKEN_PROGRAM_ID
+
+        token = AsyncToken(self.client, Pubkey_from(mint), TOKEN_PROGRAM_ID,
+                           self.keypair)
+        ata = token.get_or_create_associated_token_account(self.keypair.pubkey())
+        acct = await token.get_account_by_owner(self.keypair.pubkey())
+        if acct.value is None:
+            return 0.0
+        return acct.value.amount / 10 ** self_token_decimals(self)
+
+    async def transfer_tokens(self, mint: str, destination_wallet: str,
+                              ui_amount: float) -> str:
+        """Create the destination ATA if needed and transfer tokens."""
+        from spl.token.async_client import AsyncToken
+        from spl.token.constants import TOKEN_PROGRAM_ID
+
+        token = AsyncToken(self.client, Pubkey_from(mint), TOKEN_PROGRAM_ID,
+                           self.keypair)
+        dest_ata = await token.create_associated_token_account(
+            Pubkey_from(destination_wallet), self.keypair)
+        src_ata = await token.create_associated_token_account(
+            self.keypair.pubkey(), self.keypair)
+        resp = await token.transfer(src_ata, dest_ata, self.keypair,
+                                    int(round(ui_amount * 10 ** 9)))
+        return str(resp.value)
+
+
+def self_token_decimals(chain) -> int:
+    return 9  # pump.fun tokens use 9 decimals

@@ -18,6 +18,21 @@ CREATE TABLE IF NOT EXISTS ledger (
     signature TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS launches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mint TEXT NOT NULL,
+    sig_create TEXT,
+    sig_buy TEXT,
+    dev_buy_sol REAL NOT NULL,
+    tokens_bought REAL NOT NULL,
+    tokens_distributed REAL NOT NULL,
+    team_tokens REAL NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 CREATE TABLE IF NOT EXISTS processed_sigs (
     signature TEXT PRIMARY KEY,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -94,3 +109,28 @@ def sig_seen(conn: sqlite3.Connection, signature: str) -> bool:
 
 def mark_sig(conn: sqlite3.Connection, signature: str) -> None:
     conn.execute("INSERT OR IGNORE INTO processed_sigs (signature) VALUES (?)", (signature,))
+
+
+def record_launch(conn: sqlite3.Connection, mint: str, sig_create: str,
+                  sig_buy: str, dev_buy_sol: float, tokens_bought: float,
+                  tokens_distributed: float, team_tokens: float) -> None:
+    conn.execute(
+        "INSERT INTO launches (mint, sig_create, sig_buy, dev_buy_sol, "
+        "tokens_bought, tokens_distributed, team_tokens) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (mint, sig_create, sig_buy, dev_buy_sol, tokens_bought,
+         tokens_distributed, team_tokens),
+    )
+
+
+def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+
+
+def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
