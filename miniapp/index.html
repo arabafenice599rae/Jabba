@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jabba Curve — Simulatore</title>
+<style>
+  :root { --bg:#0e1117; --card:#161b22; --border:#30363d; --text:#e6edf3;
+          --muted:#8b949e; --green:#14f195; --purple:#9945ff; --gold:#f4ce4a; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:-apple-system,
+         "Segoe UI", Roboto, sans-serif; padding:16px; max-width:640px; margin:0 auto; }
+  h1 { font-size:18px; margin-bottom:4px; }
+  .sub { color:var(--muted); font-size:12px; margin-bottom:14px; }
+  .card { background:var(--card); border:1px solid var(--border);
+          border-radius:12px; padding:14px; margin-bottom:14px; }
+  canvas { width:100%; height:240px; display:block; touch-action:none; }
+  .stats { display:flex; gap:10px; margin-bottom:14px; }
+  .stat { flex:1; background:var(--card); border:1px solid var(--border);
+          border-radius:12px; padding:10px; text-align:center; }
+  .stat .v { font-size:14px; font-weight:600; color:var(--green); word-break:break-all; }
+  .stat .l { font-size:11px; color:var(--muted); margin-top:2px; }
+  label { font-size:12px; color:var(--muted); display:block; margin-bottom:6px; }
+  input[type=range] { width:100%; accent-color:var(--green); }
+  .row { display:flex; justify-content:space-between; font-size:13px; margin:6px 0; }
+  .row b { color:var(--gold); }
+  .seg { display:flex; gap:8px; margin-bottom:12px; }
+  .seg button { flex:1; padding:8px; border-radius:10px; border:1px solid var(--border);
+                background:var(--card); color:var(--text); font-size:13px; }
+  .seg button.on { border-color:var(--green); color:var(--green); }
+  .hint { font-size:11px; color:var(--muted); margin-top:4px; }
+</style>
+</head>
+<body>
+<h1>🧮 Jabba Curve — Simulatore</h1>
+<div class="sub">Passa il dito sul grafico per esplorare la curva</div>
+
+<div class="stats">
+  <div class="stat"><div class="v" id="s-price">–</div><div class="l">prezzo attuale (SOL)</div></div>
+  <div class="stat"><div class="v" id="s-supply">–</div><div class="l">supply (token)</div></div>
+  <div class="stat"><div class="v" id="s-fee">–</div><div class="l">fee buy/sell</div></div>
+</div>
+
+<div class="card">
+  <canvas id="chart"></canvas>
+  <div class="hint" id="hover">–</div>
+</div>
+
+<div class="card">
+  <div class="seg">
+    <button id="tab-buy" class="on">💰 Compra</button>
+    <button id="tab-sell">📤 Vendi</button>
+  </div>
+  <label id="amt-label">Depositi (SOL)</label>
+  <input type="range" id="amt" min="0" max="5" step="0.05" value="1">
+  <div class="row"><span id="r1">–</span><span id="r2">–</span></div>
+  <div class="row"><span id="r3">–</span><b id="r4">–</b></div>
+</div>
+
+<script>
+const q = new URLSearchParams(location.search);
+const P0 = parseFloat(q.get('p0') || '0.00001');
+const M  = parseFloat(q.get('m')  || '0.0000000005');
+const SUPPLY = parseFloat(q.get('supply') || '0');
+const FEEBP = parseFloat(q.get('feebp') || '30');
+const FEE = FEEBP / 10000;
+
+const price = s => P0 + M * s;
+const cost = (x, s) => P0 * x + M * s * x + M * x * x / 2;
+const tokensOut = (amt, s) => M <= 0 ? amt / P0
+  : (-(P0 + M * s) + Math.sqrt((P0 + M * s) ** 2 + 2 * M * amt)) / M;
+const sellGross = (x, s) => {
+  const sold = Math.min(x, s);
+  return P0 * sold + M * Math.max(0, s * sold - sold * sold / 2);
+};
+
+document.getElementById('s-price').textContent = price(SUPPLY).toFixed(10);
+document.getElementById('s-supply').textContent = SUPPLY.toLocaleString('it-IT',
+  {maximumFractionDigits: 0});
+document.getElementById('s-fee').textContent = (FEEBP / 100).toFixed(2) + '%';
+
+const cv = document.getElementById('chart'), ctx = cv.getContext('2d');
+let W = 0, H = 0, xMax = Math.max(SUPPLY * 1.6, 1000), yMax = price(xMax) * 1.1;
+
+function resize() {
+  const r = cv.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  cv.width = r.width * d; cv.height = r.height * d;
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  W = r.width; H = r.height; draw();
+}
+function sx(s) { return s / xMax * (W - 10) + 5; }
+function sy(p) { return H - 8 - p / yMax * (H - 24); }
+
+function draw(hoverS) {
+  ctx.clearRect(0, 0, W, H);
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 0.5;
+  for (let i = 0; i <= 4; i++) {
+    const y = 8 + i * (H - 16) / 4;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  ctx.beginPath();
+  for (let i = 0; i <= 200; i++) {
+    const s = xMax * i / 200, x = sx(s), y = sy(price(s));
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.strokeStyle = '#14f195'; ctx.lineWidth = 2.4; ctx.stroke();
+  ctx.lineTo(sx(xMax), H - 8); ctx.lineTo(sx(0), H - 8); ctx.closePath();
+  ctx.fillStyle = 'rgba(20,241,149,0.10)'; ctx.fill();
+
+  if (SUPPLY > 0 && SUPPLY <= xMax) {
+    ctx.strokeStyle = '#9945ff'; ctx.setLineDash([4, 4]); ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(sx(SUPPLY), 8); ctx.lineTo(sx(SUPPLY), H - 8); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#f4ce4a'; ctx.beginPath();
+    ctx.arc(sx(SUPPLY), sy(price(SUPPLY)), 5, 0, 7); ctx.fill();
+  }
+  if (hoverS != null) {
+    const x = sx(hoverS), y = sy(price(hoverS));
+    ctx.strokeStyle = 'rgba(244,206,74,0.5)';
+    ctx.beginPath(); ctx.moveTo(x, 8); ctx.lineTo(x, H - 8); ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, 4, 0, 7); ctx.fill();
+  }
+}
+
+let hoverS = null;
+cv.addEventListener('pointermove', e => {
+  const r = cv.getBoundingClientRect();
+  hoverS = Math.max(0, Math.min(xMax, (e.clientX - r.left - 5) / (W - 10) * xMax));
+  draw(hoverS);
+  document.getElementById('hover').textContent =
+    `${Math.round(hoverS).toLocaleString('it-IT')} token → ${price(hoverS).toFixed(10)} SOL`;
+});
+cv.addEventListener('pointerleave', () => { hoverS = null; draw(); });
+window.addEventListener('resize', resize);
+
+let mode = 'buy';
+const amt = document.getElementById('amt');
+function setMode(m) {
+  mode = m;
+  document.getElementById('tab-buy').classList.toggle('on', m === 'buy');
+  document.getElementById('tab-sell').classList.toggle('on', m === 'sell');
+  amt.max = m === 'buy' ? '5' : '100';
+  amt.value = m === 'buy' ? '1' : '25';
+  document.getElementById('amt-label').textContent =
+    m === 'buy' ? 'Depositi (SOL)' : 'Token da vendere';
+  update();
+}
+function update() {
+  const v = parseFloat(amt.value);
+  const r1 = document.getElementById('r1'), r2 = document.getElementById('r2'),
+        r3 = document.getElementById('r3'), r4 = document.getElementById('r4');
+  if (mode === 'buy') {
+    const fee = v * FEE, net = v - fee, tk = tokensOut(net, SUPPLY);
+    r1.textContent = `Deposito: ${v.toFixed(2)} SOL`;
+    r2.textContent = `Fee (${(FEEBP/100).toFixed(2)}%): ${fee.toFixed(6)} SOL`;
+    r3.textContent = `Sullo scambio: ${net.toFixed(6)} SOL`;
+    r4.textContent = `≈ ${tk.toLocaleString('it-IT', {maximumFractionDigits: 2})} token`;
+  } else {
+    const gross = sellGross(v, SUPPLY), fee = gross * FEE, net = gross - fee;
+    r1.textContent = `Vendi: ${v.toLocaleString('it-IT', {maximumFractionDigits: 2})} token`;
+    r2.textContent = `Lordo: ${gross.toFixed(6)} SOL`;
+    r3.textContent = `Fee (${(FEEBP/100).toFixed(2)}%): ${fee.toFixed(6)} SOL`;
+    r4.textContent = `Ricevi ${net.toFixed(6)} SOL`;
+  }
+}
+amt.addEventListener('input', update);
+document.getElementById('tab-buy').onclick = () => setMode('buy');
+document.getElementById('tab-sell').onclick = () => setMode('sell');
+
+resize(); update();
+</script>
+</body>
+</html>

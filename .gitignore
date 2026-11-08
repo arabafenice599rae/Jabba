@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+curvebot.db
+treasury.json
+.pytest_cache/
