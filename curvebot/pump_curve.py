@@ -32,7 +32,7 @@ def tokens_out_for_sol(sol_gross: float) -> int:
         return 0
     net_lamports = int(sol_gross * 1_000_000_000 * (1 - TOTAL_FEE_BPS / 10_000))
     out_base = VTR0 * net_lamports // (VSR0 + net_lamports)
-    return out_base
+    return min(out_base, RTR0)  # never promise more than the real reserves
 
 
 def verify_params(raw_global_account: bytes) -> dict:

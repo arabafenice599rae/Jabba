@@ -53,6 +53,8 @@ def compute_distribution(weights: dict[int, float], tokens_base: int,
     """
     if not weights or tokens_base <= 0:
         return [], 0, 0
+    if team_bps < 0 or safety_bps < 0 or team_bps + safety_bps > 10_000:
+        raise ValueError("team_bps + safety_bps fuori range (0-10000)")
     total_w = sum(weights.values())
     if total_w <= 0:
         return [], 0, 0
@@ -61,7 +63,8 @@ def compute_distribution(weights: dict[int, float], tokens_base: int,
     out = []
     assigned = 0
     for uid in sorted(weights):
-        share = distributable * weights[uid] // total_w
+        # float weights (SQLite REAL) MUST yield INTEGER base units
+        share = int(distributable * weights[uid] // total_w)
         out.append((uid, share))
         assigned += share
     dust = distributable - assigned
@@ -71,6 +74,9 @@ def compute_distribution(weights: dict[int, float], tokens_base: int,
 TOKEN_ACCOUNT_RENT_LAMPORTS = 2_039_280   # rent-exempt minimum, 165 B
 NETWORK_FEE_LAMPORTS = 5_000              # per tx
 BUNDLE_TX_COUNT = 5
+# pump.fun create-side costs (conservative upper bound): mint account,
+# Metaplex metadata, bonding curve PDA + its ATA, creator ATA, buffer.
+CREATE_COSTS_LAMPORTS = 30_000_000
 
 
 async def estimate_launch_costs(chain, cfg, n_recipients: int,
@@ -84,6 +90,7 @@ async def estimate_launch_costs(chain, cfg, n_recipients: int,
         rent = TOKEN_ACCOUNT_RENT_LAMPORTS
     breakdown = {
         "dev_buy": int(dev_buy_sol * 1_000_000_000),
+        "create_costs": CREATE_COSTS_LAMPORTS,
         "ata_rent": rent * n_recipients,
         "network_fees": NETWORK_FEE_LAMPORTS * BUNDLE_TX_COUNT,
         "priority_fee": int(cfg.launch_priority_fee * 1_000_000_000),
@@ -275,6 +282,14 @@ async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> d
     if raised <= 0:
         raise RuntimeError("nessun contributo raccolto")
     dev_buy_sol = raised * (100.0 - cfg.team_keep_percent) / 100.0
+    from .pump_curve import RTR0, VSR0, VTR0
+    net_needed = VSR0 * RTR0 / (VTR0 - RTR0)
+    max_dev_buy = net_needed / (1 - 0.0125) / 1_000_000_000
+    if dev_buy_sol > max_dev_buy:
+        raise RuntimeError(
+            f"dev buy {dev_buy_sol:.2f} SOL supera la capacita' della curva "
+            f"(max ~{max_dev_buy:.1f} SOL): il presale e' troppo grande per "
+            f"un lancio singolo, ridurre i contributi")
     contributions = {u: c for u, c in service.shares(conn).items() if c > 0}
     costs = await estimate_launch_costs(chain, cfg, len(contributions),
                                         dev_buy_sol)
@@ -328,6 +343,7 @@ async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> d
         raise RuntimeError(f"bundle fallito ({bundle_id}): "
                            f"nulla e' stato eseguito, riprovare")
     if status == "pending":
+        db.set_meta(conn, "state", "launch_unknown")
         raise RuntimeError(
             f"esito bundle SCONOSCIUTO ({bundle_id}): verificare "
             f"manualmente su Solscan PRIMA di riprovare (mai retry "

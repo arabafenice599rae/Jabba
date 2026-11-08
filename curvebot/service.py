@@ -29,7 +29,8 @@ def reserve_refund(conn, telegram_id: int, fraction: float,
     the pending row makes the reservation durable across restarts.
     Returns dict with pending_id, refund_sol, fee_sol, net_sol,
     contribution_after. Raises ValueError if not enough available."""
-    fraction = max(0.0, min(1.0, fraction))
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError("frazione fuori range [0,1]")
     if not 0 <= refund_fee_bps <= 10_000:
         raise ValueError("fee non valida (fuori range 0-100%)")
     conn.execute("BEGIN IMMEDIATE")

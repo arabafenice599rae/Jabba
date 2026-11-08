@@ -132,8 +132,6 @@ def test_launch_failed_bundle_keeps_presale_open(world, cfg, conn):
     assert db.get_meta(conn, "state") is None
 
 
-@finding("bundle outcome UNKNOWN (timeout) leaves state unset: refunds stay "
-         "open although the tokens may already be distributed")
 def test_launch_unknown_outcome_blocks_refunds(world, cfg, conn):
     world.seed(3, 1.0)
     world.state["status"] = "pending"
@@ -142,9 +140,6 @@ def test_launch_unknown_outcome_blocks_refunds(world, cfg, conn):
     assert db.get_meta(conn, "state") not in (None, "")
 
 
-@finding("preflight ignores pump.fun create costs (mint, bonding curve, "
-         "metadata, creator ATA rent): with TEAM_KEEP_PERCENT=0 it passes "
-         "although the create tx cannot be paid")
 def test_preflight_includes_create_rent(world, cfg, conn):
     cfg.team_keep_percent = 0.0
     world.seed(5, 1.0, extra_lamports=40_000_000)    # covers our estimate only
@@ -152,8 +147,6 @@ def test_preflight_includes_create_rent(world, cfg, conn):
         _run(world, cfg, conn)
 
 
-@finding("raise > ~95.6 SOL: distribution is sized on tokens the curve "
-         "cannot sell (> real reserves) -> last transfer fails, launch impossible")
 def test_launch_rejects_raise_beyond_curve_capacity(world, cfg, conn):
     world.seed(20, 6.0)                               # 120 SOL
     with pytest.raises(RuntimeError):

@@ -97,15 +97,13 @@ def test_float_residue_after_partial_refunds(conn):
         assert int(round(q["net_sol"] * 1e9)) >= 1
 
 
-@finding("reserve_refund accepts sub-lamport refunds (net rounds to 0 lamports)")
 def test_refund_quote_rejects_sub_lamport(conn):
     service.record_deposit(conn, 1, 1e-10)
     with pytest.raises(ValueError):
-        service.refund_quote(conn, 1, 1.0, 30)
+        service.reserve_refund(conn, 1, 1.0, 30)
 
 
 @pytest.mark.parametrize("fraction", [1.5, 2.0])
-@finding("reserve_refund does not clamp fraction to [0,1] (docstring says it must)")
 def test_refund_fraction_above_one_rejected(conn, fraction):
     service.record_deposit(conn, 1, 1.0)
     with pytest.raises(ValueError):

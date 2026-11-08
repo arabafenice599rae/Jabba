@@ -69,8 +69,6 @@ def test_curve_fee_is_conservative_vs_onchain_fee_on_top():
         assert pc.tokens_out_for_sol(s) <= onchain
 
 
-@finding("no cap at real token reserves: a presale over ~95.6 SOL makes "
-         "expected > tokens actually purchasable -> distribution tx fails")
 @pytest.mark.parametrize("raised", [96.0, 120.0, 300.0])
 def test_curve_never_exceeds_real_reserves(raised):
     dev_buy = raised * 0.9
@@ -136,8 +134,6 @@ def test_distribution_invariants_float_weights(weights, tokens_base, team_bps, s
     _check(weights, tokens_base, team_bps, safety_bps)
 
 
-@finding("float weights from the REAL ledger yield float token amounts, "
-         "not integer base units")
 def test_distribution_amounts_are_ints_with_real_ledger_weights():
     out, _, _ = compute_distribution({1: 0.1, 2: 0.2, 3: 0.7}, pc.RTR0, 0, 10)
     assert all(type(s) is int for _, s in out)
@@ -173,7 +169,6 @@ def test_distribution_negative_weight_is_not_rejected():
     assert any(s < 0 for _, s in out)
 
 
-@finding("team_bps + safety_bps > 10000 gives negative distributable")
 def test_distribution_rejects_overflowing_bps():
     with pytest.raises(ValueError):
         compute_distribution({1: 1}, 10**9, 9_000, 2_000)
