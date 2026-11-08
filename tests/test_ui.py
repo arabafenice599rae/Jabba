@@ -26,7 +26,22 @@ def test_main_menu_layout():
     assert len(rows[2]) == 1          # info
     datas = [b.callback_data for row in rows for b in row]
     assert set(datas) == {"menu:howbuy", "sell:open", "menu:position",
-                          "menu:chart", "menu:info"}
+                          "menu:position", "menu:chart", "menu:info"} or \
+        set(datas) == {"menu:howbuy", "sell:open", "menu:position",
+                      "menu:chart", "menu:info"}
+
+
+def test_main_menu_with_webapp():
+    kb = main_menu(webapp_url="https://user.github.io/jabba/miniapp/")
+    rows = kb.inline_keyboard
+    assert len(rows) == 4
+    webapp_row = rows[2]
+    assert len(webapp_row) == 1
+    btn = webapp_row[0]
+    assert btn.web_app is not None
+    assert btn.web_app.url == "https://user.github.io/jabba/miniapp/"
+    datas = [b.callback_data for row in rows for b in row if b.callback_data]
+    assert "menu:chart" in datas
 
 
 def test_sell_amounts_layout():

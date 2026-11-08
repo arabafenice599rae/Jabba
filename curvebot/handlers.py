@@ -56,7 +56,7 @@ async def cmd_start(message: Message, cfg, conn, chain):
     sol = await chain.balance_sol()
     await message.answer(
         _fmt_info(cfg, conn, chain.pubkey, supply, sol),
-        reply_markup=main_menu(),
+        reply_markup=main_menu(cfg.webapp_url),
     )
 
 
@@ -67,7 +67,7 @@ async def cmd_menu(message: Message, cfg, conn, chain):
     supply = db.get_state(conn)["supply_tokens"]
     sol = await chain.balance_sol()
     await message.answer(_fmt_info(cfg, conn, chain.pubkey, supply, sol),
-                         reply_markup=main_menu())
+                         reply_markup=main_menu(cfg.webapp_url))
 
 
 @router.message(Command("info"))
@@ -149,7 +149,7 @@ async def cb_back(call: CallbackQuery, cfg, conn, chain):
         return await call.answer()
     supply = db.get_state(conn)["supply_tokens"]
     sol = await chain.balance_sol()
-    await _edit(call, _fmt_info(cfg, conn, chain.pubkey, supply, sol), main_menu())
+    await _edit(call, _fmt_info(cfg, conn, chain.pubkey, supply, sol), main_menu(cfg.webapp_url))
 
 
 @router.callback_query(F.data == "menu:info")
