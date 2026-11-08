@@ -68,11 +68,29 @@ Per il lancio servono anche: `PINATA_JWT` (metadati IPFS),
 `TOKEN_NAME`/`TOKEN_SYMBOL`/`TOKEN_IMAGE_PATH`, e un RPC mainnet
 (Helius/QuickNode).
 
-## Test
+## Test e validazione (toolchain)
+
+**1. Test locali (52)** — su ogni push/PR via GitHub Actions (`.github/workflows/tests.yml`):
 
 ```bash
 pytest tests/ -q
 ```
+
+**2. Dry-run mainnet (ZERO SOL)** — valida l'intero flusso contro lo
+stato mainnet SENZA inviare nulla: verifica parametri on-chain, upload
+Pinata, build+firma della create+devbuy via PumpPortal,
+`simulateTransaction`, dimensioni tx di distribuzione, preflight costi:
+
+```bash
+python scripts/dryrun.py --wallets 36 --dev-buy 0.01
+```
+
+Il mint keypair è usa-e-getta: la tx viene costruita e simulata ma mai
+inviata. Nota: la simulazione richiede un RPC mainnet (la tx usa address
+lookup table mainnet; su devnet fallisce per questo, non per errori).
+
+**3. Collaudo finale in piccolo** — primo lancio reale con 0.1 SOL di
+dev buy (mainnet-only, nessun devnet per PumpPortal/Jito).
 
 52 test: presale (contributi, rimborsi, shares), invariante distribuzione
 in base-unit interi (Σ quote + team + dust == distribuito, per

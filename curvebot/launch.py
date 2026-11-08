@@ -139,12 +139,20 @@ async def upload_pinata_metadata(http: aiohttp.ClientSession, cfg) -> str:
 
 
 async def fetch_global_account(chain) -> bytes:
+    from solders.pubkey import Pubkey
+
     resp = await chain.client.get_account_info(
-        __import__("solders").pubkey.Pubkey.from_string(GLOBAL_ACCOUNT))
+        Pubkey.from_string(GLOBAL_ACCOUNT))
     if resp.value is None:
         raise RuntimeError("pump.fun global account non trovato")
-    import base64
-    return base64.b64decode(resp.value.data[0])
+    data = resp.value.data
+    if isinstance(data, str):
+        import base64
+        return base64.b64decode(data)
+    if isinstance(data, (tuple, list)):
+        import base64
+        return base64.b64decode(data[0])
+    return bytes(data)
 
 
 class PumpPortal:
@@ -154,8 +162,9 @@ class PumpPortal:
     async def create_with_devbuy(self, payer: str, mint: str, uri: str,
                                  name: str, symbol: str,
                                  dev_buy_sol: float, slippage: float,
-                                 priority_fee: float) -> str:
-        """Create tx INCLUDING the dev buy. Returns base58 unsigned tx."""
+                                 priority_fee: float) -> bytes:
+        """Create tx INCLUDING the dev buy. Returns the RAW unsigned tx
+        bytes (trade-local single-tx response format)."""
         payload = {
             "publicKey": payer,
             "action": "create",
@@ -168,9 +177,9 @@ class PumpPortal:
             "pool": "pump",
         }
         async with self.http.post(f"{PUMPPORTAL_BASE}/trade-local",
-                                  data=payload) as r:
+                                  json=payload) as r:
             r.raise_for_status()
-            return await r.text()
+            return await r.read()
 
 
 def parse_inflight_status(data: dict) -> str:

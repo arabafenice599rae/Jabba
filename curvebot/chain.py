@@ -90,12 +90,19 @@ class Chain:
 
     # --- launch support (pump.fun) ---
 
-    def sign_b58(self, tx_b58: str, extra_signers=None) -> bytes:
-        """Sign a base58 PumpPortal transaction; returns signed tx bytes."""
+    def sign_b58(self, tx_data, extra_signers=None) -> bytes:
+        """Sign a PumpPortal transaction. Accepts raw tx BYTES (the usual
+        trade-local single-tx response) or a base58 string (bundle format).
+        Returns signed tx bytes."""
         import base58
         from solders.transaction import VersionedTransaction
 
-        raw = base58.b58decode(tx_b58)
+        if isinstance(tx_data, str):
+            raw = base58.b58decode(tx_data)
+        elif isinstance(tx_data, (bytes, bytearray)):
+            raw = bytes(tx_data)
+        else:
+            raise TypeError(f"formato tx non supportato: {type(tx_data)}")
         txn = VersionedTransaction.from_bytes(raw)
         signers = [self.keypair] + list(extra_signers or [])
         return bytes(VersionedTransaction(txn.message, signers))
