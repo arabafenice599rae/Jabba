@@ -125,7 +125,7 @@ async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
     tx_create = chain.sign_b58(create_b58, extra_signers=[mint_kp])
 
     treasury_sol = await chain.balance_sol()
-    dev_buy_sol = treasury_sol * cfg.dev_buy_percent / 100.0
+    dev_buy_sol = treasury_sol * (100.0 - cfg.team_keep_percent) / 100.0
     dev_buy_sol = min(dev_buy_sol, treasury_sol - 0.01)
     if dev_buy_sol <= 0:
         raise RuntimeError("treasury SOL insufficient for dev buy")
@@ -140,7 +140,7 @@ async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
         uid: c for uid, c in service.shares(conn).items() if c > 0
     }
     dist, team = compute_distribution(contributions, expected,
-                                      cfg.team_share_bps)
+                                      cfg.team_share_bps)  # default 0
 
     wallets = {uid: db.get_wallet(conn, uid) for uid, _ in dist}
     recipients = [

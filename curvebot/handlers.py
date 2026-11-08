@@ -26,7 +26,7 @@ def _est_tokens(conn, cfg, contribution: float) -> float:
     raised = db.total_raised(conn)
     if raised <= 0:
         return 0.0
-    dev_buy = raised * cfg.dev_buy_percent / 100.0
+    dev_buy = raised * (100.0 - cfg.team_keep_percent) / 100.0
     expected = tokens_out_for_sol(dev_buy)
     user_share = tokens_out_for_sol(dev_buy * contribution / raised)
     return user_share * (1 - cfg.team_share_bps / 10_000.0)
@@ -35,7 +35,7 @@ def _est_tokens(conn, cfg, contribution: float) -> float:
 def _fmt_info(cfg, conn, chain_pubkey: str, sol: float) -> str:
     raised = db.total_raised(conn)
     n = len(service.shares(conn))
-    est = tokens_out_for_sol(raised * cfg.dev_buy_percent / 100.0) \
+    est = tokens_out_for_sol(raised * (100.0 - cfg.team_keep_percent) / 100.0) \
         if raised > 0 else 0.0
     return (
         f"🏦 <b>Jabba Presale</b>\n\n"
@@ -148,8 +148,9 @@ async def cmd_launch(message: Message, cfg, conn):
         f"🚀 <b>LANCIO SU PUMP.FUN</b>\n\n"
         f"Token: <b>{cfg.token_name}</b> (${cfg.token_symbol})\n"
         f"Raccolto: <b>{raised:.4f} SOL</b> ({len(contributions)} partecipanti)\n"
-        f"Dev buy: <b>{cfg.dev_buy_percent}%</b> del treasury\n"
-        f"Quota team: <b>{cfg.team_share_bps / 100:.2f}%</b> (il resto agli utenti)\n"
+        f"Team trattiene: <b>{cfg.team_keep_percent:.0f}%</b> dei SOL\n"
+        f"Dev buy: <b>{100 - cfg.team_keep_percent:.0f}%</b> dei SOL → pump.fun\n"
+        f"Token: <b>100% agli utenti</b> (∝ SOL versati)\n"
         f"Bundle atomico: create + buy + distribuzione nello stesso slot\n\n"
         f"⚠️ Irreversibile, su mainnet. Confermi?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -217,7 +218,7 @@ async def cb_chart(call: CallbackQuery, cfg, conn):
         return await call.answer()
     from .chart import render_pump_curve_png
     raised = db.total_raised(conn)
-    png = render_pump_curve_png(dev_buy_sol=raised * cfg.dev_buy_percent / 100.0)
+    png = render_pump_curve_png(dev_buy_sol=raised * (100.0 - cfg.team_keep_percent) / 100.0)
     await call.message.answer_photo(
         png, caption="📈 <b>Curva pump.fun attesa</b> (dev buy al lancio)",
         reply_markup=back_to_menu())
