@@ -139,9 +139,19 @@ async def cmd_launch(message: Message, cfg, conn):
     if not cfg.token_name or not cfg.token_symbol:
         await message.answer("Configura TOKEN_NAME e TOKEN_SYMBOL nel .env.")
         return
+    if not cfg.pinata_jwt:
+        await message.answer("Configura PINATA_JWT nel .env (metadata su IPFS).")
+        return
     contributions = {u: c for u, c in service.shares(conn).items() if c > 0}
     if not contributions:
         await message.answer("Nessun contributo nel presale, niente da lanciare.")
+        return
+    from .launch import MAX_PARTICIPANTS
+    if len(contributions) > MAX_PARTICIPANTS:
+        await message.answer(
+            f"⚠️ {len(contributions)} partecipanti superano il limite atomico "
+            f"di {MAX_PARTICIPANTS}: piu bundle non sono atomici tra loro. "
+            f"Ridurre i partecipanti.")
         return
     raised = db.total_raised(conn)
     await message.answer(
@@ -151,6 +161,7 @@ async def cmd_launch(message: Message, cfg, conn):
         f"Team trattiene: <b>{cfg.team_keep_percent:.0f}%</b> dei SOL\n"
         f"Dev buy: <b>{100 - cfg.team_keep_percent:.0f}%</b> dei SOL → pump.fun\n"
         f"Token: <b>100% agli utenti</b> (∝ SOL versati)\n"
+        f"Bundle atomico: create+devbuy in 1 tx + distribuzione, stesso slot\n"
         f"Bundle atomico: create + buy + distribuzione nello stesso slot\n\n"
         f"⚠️ Irreversibile, su mainnet. Confermi?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -333,6 +344,6 @@ async def cb_launch_go(call: CallbackQuery, cfg, conn, chain):
         f"Dev buy: {report['dev_buy_sol']:.4f} SOL\n"
         f"Token comprati: {report['tokens_bought']:,.0f}\n"
         f"Distribuiti: {report['distributed']:,.0f} a {report['wallets']} wallet\n"
-        f"Team: {report['team_tokens']:,.0f}\n\n"
+        f"Team: {report['team_tokens']:,.0f} · Dust in treasury: {report['dust_tokens']:,.0f}\n\n"
         f"I token sono nei wallet degli utenti. La curva è ora su pump.fun."
     )

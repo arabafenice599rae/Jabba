@@ -128,11 +128,16 @@ curvebot/
 
 | Vincolo | Valore | Gestione |
 |---|---|---|
-| Tx per bundle | 5 | create + buy + 3 chunk → max 45 utenti |
-| Transfer per tx | ~15 | chunk da 15 |
+| Tx per bundle | 5 | create+devbuy (1) + 4 chunk → max 36 utenti |
+| Transfer per tx | 9 | misurato: 92 B/utente, limite 1232 B/tx |
 | Devnet | inesistente | primo lancio in piccolo (0.1 SOL) |
-| Fee curva pump | 1.25%/lato | inclusa nella matematica |
-| Creator fee | +0.30%/trade al treasury | ricavo passivo |
+| Fee curva pump | 125 bps totali (95 protocollo + 30 creator) | in pump_curve.py, verificato on-chain |
+| Creator fee | +0.30%/trade | NON automatico: si accumula nel creator vault, richiede collect/claim esplicito |
+| Parametri curva | verificati a runtime | launch abortisce se il global account non matcha |
+
+**Atomicità — dichiarazione precisa**: garantita SOLO dentro un singolo
+bundle. Oltre 36 partecipanti il lancio viene rifiutato esplicitamente;
+NON esiste una modalità "multi-bundle atomica" e non ne viene promessa una.
 
 ## 5. FASE 3 — Mercato (automatico, zero codice)
 
@@ -170,6 +175,8 @@ processed_sigs(signature PK) -- idempotenza depositi
 | MIN_DEPOSIT_SOL | 0.01 | |
 | POLL_INTERVAL_S | 5 | latenza accredito |
 | TOKEN_NAME/SYMBOL/DESCRIPTION/IMAGE_PATH | — | launch |
+| PINATA_JWT | — | metadata IPFS (obbligatorio per /launch) |
+| SAFETY_BPS | 10 | margine anti-overflow sulla distribuzione |
 | TEAM_KEEP_PERCENT | 10 | % SOL trattenuto dal team |
 | TEAM_SHARE_BPS | 0 | quota token al team (0 = tutti agli utenti) |
 | LAUNCH_SLIPPAGE / PRIORITY_FEE | 10 / 0.0005 | |
@@ -217,4 +224,5 @@ produzione; graduazione PumpSwap.
 1. Collaudo mainnet in piccolo (0.1 SOL)
 2. WebSocket per depositi (sub-secondo, via logsSubscribe)
 3. Fallback launch senza PumpPortal (istruzioni pump.fun a mano)
-4. Bundle multipli per >45 utenti (bundle concatenati stesso slot)
+4. Oltre 36 utenti: lancio NON atomico esplicito (bundle create+devbuy,
+   poi distribuzione separata reconcile-able) — dichiarato, mai implicito

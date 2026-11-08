@@ -21,6 +21,13 @@ creazione + dev buy + distribuzione ai wallet nello stesso slot.
 
 ## Attenzione
 
+- **Custodia**: il presale è custodiale (l'operatore tiene i SOL durante
+  la raccolta); solo il lancio (bundle atomico) è zero-custodia. Le due
+  fasi sono diverse e la distinzione va comunicata agli utenti.
+
+- **Il presale è custodiale**: durante la raccolta l'operatore controlla i
+  SOL e può emettere rimborsi; solo il lancio atomico elimina gli stati
+  intermedi di distribuzione. Le due cose sono diverse e vanno dichiarate.
 - Il saldo token esiste **solo nel DB del bot**: non è visibile in Phantom,
   non è trasferibile fuori dal bot, e un errore nel DB può perderlo.
 - Il treasury è **custodiale**: i SOL degli utenti stanno nel wallet del bot.

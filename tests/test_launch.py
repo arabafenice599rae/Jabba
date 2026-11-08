@@ -1,43 +1,62 @@
 import pytest
 
-from curvebot.launch import compute_distribution
+from curvebot.launch import CHUNK_SIZE, MAX_PARTICIPANTS, compute_distribution, plan_chunks
 
 
-def test_distribution_proportional():
-    positions = {1: 60.0, 2: 30.0, 3: 10.0}
-    dist, team = compute_distribution(positions, 1000.0, 0)
-    shares = dict(dist)
-    assert shares[1] == pytest.approx(600.0)
-    assert shares[2] == pytest.approx(300.0)
-    assert shares[3] == pytest.approx(100.0)
-    assert team == 0.0
-    assert sum(shares.values()) == pytest.approx(1000.0)
+def weights_for(n):
+    return {i: (i % 7 + 1) * 0.5 for i in range(1, n + 1)}
 
 
-def test_distribution_with_team_share():
-    positions = {1: 50.0, 2: 50.0}
-    dist, team = compute_distribution(positions, 1000.0, 500)  # 5%
-    assert team == pytest.approx(50.0)
-    shares = dict(dist)
-    assert shares[1] == pytest.approx(475.0)
-    assert shares[2] == pytest.approx(475.0)
-    assert sum(shares.values()) + team == pytest.approx(1000.0)
+class TestInvariant:
+    """Invariant: sum(shares) + team + dust == distributable <= tokens."""
+
+    @pytest.mark.parametrize("n", [1, 15, 30, 36])
+    def test_sum_equals_bought(self, n):
+        tokens = 1_073_000_000 * 10**6 // 4
+        dist, team, dust = compute_distribution(weights_for(n), tokens, 0)
+        assert sum(a for _, a in dist) + team + dust == tokens
+        assert team == 0 and dust >= 0
+
+    def test_with_team_and_safety(self):
+        tokens = 500_000_000 * 10**6
+        dist, team, dust = compute_distribution(weights_for(10), tokens,
+                                                team_bps=300, safety_bps=10)
+        assert team == tokens * 300 // 10_000
+        assert sum(a for _, a in dist) + dust == tokens * (10_000 - 300 - 10) // 10_000
+        assert sum(a for _, a in dist) + team + dust <= tokens
+
+    def test_deterministic(self):
+        tokens = 123_456_789_123
+        r1 = compute_distribution(weights_for(12), tokens, 0)
+        r2 = compute_distribution(weights_for(12), tokens, 0)
+        assert r1 == r2
+
+    def test_proportional(self):
+        dist, _, _ = compute_distribution({1: 60.0, 2: 30.0, 3: 10.0},
+                                          1_000_000 * 10**6, 0)
+        d = dict(dist)
+        assert d[1] == 600_000 * 10**6
+        assert d[2] == 300_000 * 10**6
+        assert d[3] == 100_000 * 10**6
+
+    def test_empty(self):
+        assert compute_distribution({}, 100, 0) == ([], 0, 0)
+        assert compute_distribution({1: 5}, 0, 0) == ([], 0, 0)
 
 
-def test_distribution_sums_exactly():
-    positions = {i: i * 1.7 for i in range(1, 25)}
-    tokens = 12345.678
-    dist, team = compute_distribution(positions, tokens, 300)
-    assert sum(a for _, a in dist) + team == pytest.approx(tokens, rel=1e-9)
+class TestChunking:
+    @pytest.mark.parametrize("n,expected_chunks", [
+        (1, 1), (9, 1), (10, 2), (15, 2), (30, 4), (36, 4),
+    ])
+    def test_chunking(self, n, expected_chunks):
+        recipients = [(f"wallet{i}", 100) for i in range(n)]
+        chunks = plan_chunks(recipients)
+        assert len(chunks) == expected_chunks
+        assert all(len(c) <= CHUNK_SIZE for c in chunks)
+        assert sum(len(c) for c in chunks) == n
 
-
-def test_distribution_single_user():
-    dist, team = compute_distribution({7: 100.0}, 500.0, 1000)  # 10%
-    assert dict(dist)[7] == pytest.approx(450.0)
-    assert team == pytest.approx(50.0)
-
-
-def test_distribution_empty():
-    assert compute_distribution({}, 100.0, 500) == ([], 0.0)
-    assert compute_distribution({1: 10.0}, 0.0, 500) == ([], 0.0)
-    assert compute_distribution({1: 0.0}, 100.0, 500) == ([], 0.0)
+    @pytest.mark.parametrize("n", [37, 45, 46, 100])
+    def test_rejects_over_capacity(self, n):
+        recipients = [(f"wallet{i}", 100) for i in range(n)]
+        with pytest.raises(ValueError, match="atomic"):
+            plan_chunks(recipients)

@@ -142,12 +142,13 @@ class Chain:
 
 
     def build_distribution_tx(self, mint: str,
-                              recipients: list[tuple[str, float]],
+                              recipients: list[tuple[str, int]],
                               tip_lamports: int = 0,
                               tip_account: str = "") -> bytes:
         """All transfers in ONE transaction: create destination ATAs
-        (idempotent) and transfer tokens to every recipient. Optionally
-        appends a Jito tip transfer. Returns the signed tx bytes."""
+        (idempotent) and transfer tokens to every recipient. Amounts are
+        in BASE UNITS (10**DECIMALS, i.e. 10**6 for pump.fun tokens).
+        Optionally appends a Jito tip transfer. Returns signed tx bytes."""
         import solders.transaction as txmod
         from spl.token.constants import TOKEN_PROGRAM_ID
         from spl.token.instructions import (
@@ -156,7 +157,6 @@ class Chain:
             transfer_checked,
         )
         from spl.token.instructions import models
-        from .pump_curve import ui_to_base
 
         mint_pk = Pubkey_from(mint)
         owner = self.keypair.pubkey()
@@ -176,7 +176,7 @@ class Chain:
                 mint=mint_pk,
                 dest=dest_ata,
                 owner=owner,
-                amount=ui_to_base(amount),
+                amount=amount,
                 decimals=6,
                 signers=[owner],
             )))

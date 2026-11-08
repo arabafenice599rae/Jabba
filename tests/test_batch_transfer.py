@@ -32,7 +32,7 @@ def test_batch_transfer_builds_single_tx(tmp_path):
     chain.keypair = kp
     chain.client = FakeRPC()
 
-    recipients = [(str(Keypair().pubkey()), 100.0) for _ in range(5)]
+    recipients = [(str(Keypair().pubkey()), 100_000_000) for _ in range(5)]
     sig = asyncio.run(chain.transfer_tokens_batch(
         str(Keypair().pubkey()), recipients))
     assert sig == "fakesig123"
@@ -56,5 +56,5 @@ def test_batch_transfer_skips_zero_amounts():
     chain.keypair = kp
     chain.client = FakeRPC()
     sig = asyncio.run(chain.transfer_tokens_batch(
-        str(Keypair().pubkey()), [(str(Keypair().pubkey()), 0.0)]))
+        str(Keypair().pubkey()), [(str(Keypair().pubkey()), 0)]))
     assert sig == ""

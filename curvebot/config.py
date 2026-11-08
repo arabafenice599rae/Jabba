@@ -19,6 +19,8 @@ class Config:
     token_symbol: str = field(default_factory=lambda: _env("TOKEN_SYMBOL", ""))
     token_description: str = field(default_factory=lambda: _env("TOKEN_DESCRIPTION", ""))
     token_image_path: str = field(default_factory=lambda: _env("TOKEN_IMAGE_PATH", "token.png"))
+    pinata_jwt: str = field(default_factory=lambda: _env("PINATA_JWT", ""))
+    safety_bps: int = field(default_factory=lambda: int(_env("SAFETY_BPS", "10")))
     token_twitter: str = field(default_factory=lambda: _env("TOKEN_TWITTER", ""))
     token_telegram: str = field(default_factory=lambda: _env("TOKEN_TELEGRAM", ""))
     token_website: str = field(default_factory=lambda: _env("TOKEN_WEBSITE", ""))
