@@ -143,15 +143,20 @@ async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
     dist, team = compute_distribution(positions, bought, cfg.team_share_bps)
 
     wallets = {uid: db.get_wallet(conn, uid) for uid, _ in dist}
-    sent = 0
-    for uid, amount in dist:
-        wallet = wallets.get(uid)
-        if not wallet or amount <= 0:
-            continue
-        await chain.transfer_tokens(mint, wallet, amount)
-        sent += amount
-    log.info("distributed %.2f tokens to %d wallets (team %.2f)",
-             sent, len(dist), team)
+    recipients = [
+        (wallets[uid], amount) for uid, amount in dist
+        if wallets.get(uid) and amount > 0
+    ]
+    # chunk to stay within tx size limits; each chunk is a single tx,
+    # so the custody window is one slot per chunk, not per user
+    CHUNK = 15
+    sent = 0.0
+    for i in range(0, len(recipients), CHUNK):
+        batch = recipients[i:i + CHUNK]
+        await chain.transfer_tokens_batch(mint, batch)
+        sent += sum(a for _, a in batch)
+    log.info("distributed %.2f tokens to %d wallets in %d tx (team %.2f)",
+             sent, len(recipients), (len(recipients) + CHUNK - 1) // CHUNK, team)
 
     db.record_launch(conn, mint, sig_create, sig_buy, dev_buy_sol, bought,
                      sent, team)

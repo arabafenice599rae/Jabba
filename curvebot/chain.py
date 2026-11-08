@@ -134,5 +134,58 @@ class Chain:
         return str(resp.value)
 
 
+    async def transfer_tokens_batch(self, mint: str,
+                                    recipients: list[tuple[str, float]]) -> str:
+        """All transfers in ONE transaction: create destination ATAs
+        (idempotent) and transfer tokens to every recipient. Minimizes the
+        custody window to a single slot after the dev buy."""
+        import solders.transaction as txmod
+        from spl.token.constants import TOKEN_PROGRAM_ID
+        from spl.token.instructions import (
+            create_idempotent_associated_token_account,
+            get_associated_token_address,
+            transfer_checked,
+        )
+        from spl.token.instructions import models
+
+        mint_pk = Pubkey_from(mint)
+        owner = self.keypair.pubkey()
+        src_ata = get_associated_token_address(owner, mint_pk)
+        ixs = []
+        for wallet, amount in recipients:
+            if amount <= 0:
+                continue
+            dest_pk = Pubkey_from(wallet)
+            dest_ata = get_associated_token_address(dest_pk, mint_pk)
+            ixs.append(create_idempotent_associated_token_account(
+                payer=owner, owner=dest_pk, mint=mint_pk,
+            ))
+            ixs.append(transfer_checked(models.TransferCheckedParams(
+                program_id=TOKEN_PROGRAM_ID,
+                source=src_ata,
+                mint=mint_pk,
+                dest=dest_ata,
+                owner=owner,
+                amount=int(round(amount * 10 ** 9)),
+                decimals=9,
+                signers=[owner],
+            )))
+        if not ixs:
+            return ""
+        bh = await self.client.get_latest_blockhash()
+        txn = txmod.Transaction.new_signed_with_payer(
+            ixs, owner, [self.keypair], bh.value.blockhash)
+        resp = await self.client.send_transaction(txn)
+        return str(resp.value)
+
+    def _system_program(self):
+        from solders.pubkey import Pubkey
+        return Pubkey.from_string("11111111111111111111111111111111")
 def self_token_decimals(chain) -> int:
     return 9  # pump.fun tokens use 9 decimals
+
+
+
+def Pubkey_from(s: str):
+    from solders.pubkey import Pubkey
+    return Pubkey.from_string(s)
