@@ -63,12 +63,27 @@ curvebot/
 tests/         test curve + db + service
 ```
 
+## Interfaccia
+
+`/start` apre il menu con bottoni inline:
+
+- 💰 Come comprare · 📤 Vendi
+- 📊 Posizione · 📈 Curva
+- ℹ️ Info
+
+La vendita è guidata: scelta percentuale (25/50/75/100%) →
+quotazione con fee → conferma con due bottoni (✅/❌).
+`/chart` (o il bottone 📈) invia il grafico PNG della curva con il
+supply attuale segnato.
+
 ## Comandi
 
 | Comando | Effetto |
 |---|---|
+| `/start` `/menu` | pannello con bottoni inline |
 | `/setwallet <pubkey>` | registra il wallet per depositi e rimborsi |
 | `/info` | indirizzo treasury, prezzo, supply, SOL accumulati, fee buy/sell |
 | `/price` | prezzo attuale |
-| `/position` | token posseduti (ledger off-chain) |
-| `/sell <x o x%>` | vende e invia i SOL (meno fee) al wallet |
+| `/position` | token posseduti e valore netto se vendi ora |
+| `/chart` `/curva` | grafico PNG della curva |
+| `/sell` | apre il menu vendita a bottoni |
