@@ -29,6 +29,7 @@ class Config:
     team_share_bps: int = field(default_factory=lambda: int(_env("TEAM_SHARE_BPS", "500")))
     launch_slippage: float = field(default_factory=lambda: float(_env("LAUNCH_SLIPPAGE", "10")))
     launch_priority_fee: float = field(default_factory=lambda: float(_env("LAUNCH_PRIORITY_FEE", "0.0005")))
+    jito_tip_lamports: int = field(default_factory=lambda: int(_env("JITO_TIP_LAMPORTS", "1000000")))
 
     allowed_ids: list[int] = field(default_factory=lambda: [
         int(x) for x in _env("ALLOWED_TELEGRAM_IDS").split(",") if x.strip()

@@ -98,29 +98,31 @@ class PumpPortal:
 
 
 async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
-    """Full launch: create -> dev buy -> distribute. Returns a report dict.
+    """ATOMIC launch via a Jito bundle: create + dev buy + distribution,
+    all in the same slot. If any tx fails, everything reverts — the treasury
+    never holds tokens in any confirmed on-chain state.
 
-    The presale SOL in the treasury funds the dev buy. Tokens are held by
-    the treasury only for the seconds between the buy and the transfers.
+    The distribution can be pre-built because the token is created inside
+    the same bundle: its curve is virgin, so the dev-buy output is exactly
+    computable offline (pump_curve.tokens_out_for_sol).
+
+    Jito bundles accept up to 5 txs: create + buy + 3 distribution chunks
+    of 15 users each -> max 45 participants per atomic launch.
     """
-    import base64
-
-    import solders.transaction as txmod
     from solders.keypair import Keypair
-    from solders.pubkey import Pubkey
+
+    from .pump_curve import tokens_out_for_sol
 
     portal = PumpPortal(http)
-    from solders.keypair import Keypair as KP
-    mint_kp = KP()
+    mint_kp = Keypair()
+    mint = str(mint_kp.pubkey())
 
-    create_tx = await portal.create_token(
-        str(mint_kp.pubkey()), cfg.token_name, cfg.token_symbol,
+    create_b58 = await portal.create_token(
+        mint, cfg.token_name, cfg.token_symbol,
         cfg.token_description, cfg.token_image_path,
         cfg.token_twitter, cfg.token_telegram, cfg.token_website,
     )
-    sig_create = await chain.sign_send_b58(create_tx, extra_signers=[mint_kp])
-    mint = str(mint_kp.pubkey())
-    log.info("token created: %s (%s)", mint, sig_create)
+    tx_create = chain.sign_b58(create_b58, extra_signers=[mint_kp])
 
     treasury_sol = await chain.balance_sol()
     dev_buy_sol = treasury_sol * cfg.dev_buy_percent / 100.0
@@ -128,40 +130,54 @@ async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
     if dev_buy_sol <= 0:
         raise RuntimeError("treasury SOL insufficient for dev buy")
 
-    buy_tx = await portal.buy(chain.pubkey, mint, dev_buy_sol,
+    buy_b58 = await portal.buy(chain.pubkey, mint, dev_buy_sol,
                               slippage=cfg.launch_slippage,
                               priority_fee=cfg.launch_priority_fee)
-    sig_buy = await chain.sign_send_b58(buy_tx)
-    log.info("dev buy: %.4f SOL (%s)", dev_buy_sol, sig_buy)
+    tx_buy = chain.sign_b58(buy_b58)
 
-    bought = await chain.token_balance(mint)
+    expected = tokens_out_for_sol(dev_buy_sol)
     positions = {
         row["telegram_id"]: db.user_position(conn, row["telegram_id"])
         for row in conn.execute("SELECT DISTINCT telegram_id FROM ledger")
     }
     positions = {uid: p for uid, p in positions.items() if p > 0}
-    dist, team = compute_distribution(positions, bought, cfg.team_share_bps)
+    dist, team = compute_distribution(positions, expected, cfg.team_share_bps)
 
     wallets = {uid: db.get_wallet(conn, uid) for uid, _ in dist}
     recipients = [
         (wallets[uid], amount) for uid, amount in dist
         if wallets.get(uid) and amount > 0
     ]
-    # chunk to stay within tx size limits; each chunk is a single tx,
-    # so the custody window is one slot per chunk, not per user
     CHUNK = 15
-    sent = 0.0
-    for i in range(0, len(recipients), CHUNK):
-        batch = recipients[i:i + CHUNK]
-        await chain.transfer_tokens_batch(mint, batch)
-        sent += sum(a for _, a in batch)
-    log.info("distributed %.2f tokens to %d wallets in %d tx (team %.2f)",
-             sent, len(recipients), (len(recipients) + CHUNK - 1) // CHUNK, team)
+    chunks = [recipients[i:i + CHUNK] for i in range(0, len(recipients), CHUNK)]
+    if 2 + len(chunks) > 5:
+        raise RuntimeError(
+            f"troppi partecipanti ({len(recipients)}) per un bundle atomico "
+            f"(max 45); ridurre i partecipanti o lanciare in modalita non atomica")
 
-    db.record_launch(conn, mint, sig_create, sig_buy, dev_buy_sol, bought,
+    tip_accounts = await chain.fetch_tip_accounts(http)
+    tip_account = tip_accounts[0]
+    await chain.refresh_blockhash()
+
+    dist_txs = []
+    for i, chunk in enumerate(chunks):
+        is_last = i == len(chunks) - 1
+        tip = cfg.jito_tip_lamports if is_last else 0
+        dist_txs.append(chain.build_distribution_tx(
+            mint, chunk, tip_lamports=tip, tip_account=tip_account))
+
+    bundle = [tx_create, tx_buy] + dist_txs
+    bundle_id = await chain.send_bundle(http, bundle)
+    log.info("atomic bundle %s submitted: mint=%s dev_buy=%.4f SOL "
+             "expected=%.0f tokens to %d wallets",
+             bundle_id, mint, dev_buy_sol, expected, len(recipients))
+
+    sent = sum(a for _, a in recipients)
+    db.record_launch(conn, mint, bundle_id, bundle_id, dev_buy_sol, expected,
                      sent, team)
     db.set_meta(conn, "state", "launched")
     db.set_meta(conn, "mint", mint)
-    return {"mint": mint, "sig_create": sig_create, "sig_buy": sig_buy,
-            "dev_buy_sol": dev_buy_sol, "tokens_bought": bought,
-            "distributed": sent, "team_tokens": team, "wallets": len(dist)}
+    return {"mint": mint, "bundle_id": bundle_id,
+            "dev_buy_sol": dev_buy_sol, "tokens_bought": expected,
+            "distributed": sent, "team_tokens": team,
+            "wallets": len(recipients)}

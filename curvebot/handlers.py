@@ -352,7 +352,8 @@ async def cb_launch_go(call: CallbackQuery, cfg, conn, chain):
     await call.message.answer(
         f"🚀 <b>LANCIATO!</b>\n\n"
         f"🪙 <code>{report['mint']}</code>\n"
-        f"🔗 pump.fun/coin/{report['mint']}\n\n"
+        f"🔗 pump.fun/coin/{report['mint']}\n"
+        f"⚛️ Bundle atomico: <code>{report['bundle_id']}</code>\n\n"
         f"Dev buy: {report['dev_buy_sol']:.4f} SOL\n"
         f"Token comprati: {report['tokens_bought']:,.0f}\n"
         f"Distribuiti: {report['distributed']:,.0f} a {report['wallets']} wallet\n"

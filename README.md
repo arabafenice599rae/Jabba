@@ -84,13 +84,22 @@ Quando il presale è pronto, l'admin lancia con `/launch`:
    (firma client-side: le chiavi non lasciano mai il bot)
 2. **Dev buy** col SOL del treasury (`DEV_BUY_PERCENT`, default 95%)
    — acquisto al bottom della curva
-3. **Distribuzione immediata** ai wallet registrati, in proporzione alle
+3. **Distribuzione atomica** ai wallet registrati, in proporzione alle
    posizioni del presale (`TEAM_SHARE_BPS` al team, default 5%)
-   — il treasury detiene i token solo per pochi secondi
+   — create + dev buy + distribuzione viaggiano in un **bundle atomico
+   Jito** (stesso slot): o tutto riesce, o tutto torna indietro. Il
+   treasury non detiene mai i token in nessuno stato confermato on-chain.
+   La distribuzione è pre-computabile perché la curva è vergine nel
+   bundle stesso (matematica in `pump_curve.py`, verificata da test).
+
+   Limite bundle: 5 tx → max 45 partecipanti per lancio atomico
+   (15 transfer per tx). Tip Jito: `JITO_TIP_LAMPORTS` (default 0.001 SOL),
+   pagato solo se il bundle atterra.
 4. Da lì la curva vive su pump.fun: alla graduazione (~85 SOL) pump.fun
    crea la pool su PumpSwap e Jupiter la indicizza, automaticamente
 
-⚠️ pump.fun è solo mainnet: il primo lancio si collauda con cifre piccole.
+⚠️ pump.fun e Jito sono solo mainnet: il primo lancio si collauda con
+cifre piccole (es. 0.1 SOL di dev buy).
 Distribuire subito è importante: screener come trench.bot/GMGN marchiano
 i token con supply concentrato nel wallet del dev.
 
