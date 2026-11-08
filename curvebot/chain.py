@@ -100,47 +100,6 @@ class Chain:
         signers = [self.keypair] + list(extra_signers or [])
         return bytes(VersionedTransaction(txn.message, signers))
 
-    async def sign_send_b58(self, tx_b58: str, extra_signers=None) -> str:
-        import base64
-
-        from solders.transaction import VersionedTransaction
-
-        signed = self.sign_b58(tx_b58, extra_signers)
-        txn = VersionedTransaction.from_bytes(signed)
-        resp = await self.client.send_transaction(txn)
-        return str(resp.value)
-
-    async def token_balance(self, mint: str) -> float:
-        """Token balance of the treasury's ATA for `mint` (ui units)."""
-        from spl.token.async_client import AsyncToken
-        from spl.token.constants import TOKEN_PROGRAM_ID
-
-        token = AsyncToken(self.client, Pubkey_from(mint), TOKEN_PROGRAM_ID,
-                           self.keypair)
-        ata = token.get_or_create_associated_token_account(self.keypair.pubkey())
-        acct = await token.get_account_by_owner(self.keypair.pubkey())
-        if acct.value is None:
-            return 0.0
-        return acct.value.amount / 10 ** 6
-
-    async def transfer_tokens(self, mint: str, destination_wallet: str,
-                              ui_amount: float) -> str:
-        """Create the destination ATA if needed and transfer tokens."""
-        from spl.token.async_client import AsyncToken
-        from spl.token.constants import TOKEN_PROGRAM_ID
-        from .pump_curve import ui_to_base
-
-        token = AsyncToken(self.client, Pubkey_from(mint), TOKEN_PROGRAM_ID,
-                           self.keypair)
-        dest_ata = await token.create_associated_token_account(
-            Pubkey_from(destination_wallet), self.keypair)
-        src_ata = await token.create_associated_token_account(
-            self.keypair.pubkey(), self.keypair)
-        resp = await token.transfer(src_ata, dest_ata, self.keypair,
-                                    ui_to_base(ui_amount))
-        return str(resp.value)
-
-
     def build_distribution_tx(self, mint: str,
                               recipients: list[tuple[str, int]],
                               tip_lamports: int = 0,
@@ -240,9 +199,6 @@ class Chain:
     def _system_program(self):
         from solders.pubkey import Pubkey
         return Pubkey.from_string("11111111111111111111111111111111")
-def self_token_decimals(chain) -> int:
-    return 9  # pump.fun tokens use 9 decimals
-
 
 
 def Pubkey_from(s: str):
