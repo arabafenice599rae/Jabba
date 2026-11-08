@@ -41,9 +41,12 @@ FASE 3 — MERCATO (automatico)
 - **Verifica on-chain a runtime**: prima di lanciare, il bot legge
   l'account global del programma pump.fun e confronta i parametri della
   curva (VTR/VSR/RTR/supply/fee); se non matchano, il lancio abortisce
-- **Preflight economico dinamico**: `dev_buy + rent_ATA×N + fee_rete +
-  priority_fee + tip` calcolato prima di firmare; rent per 36 utenti
-  ≈ 0.073 SOL; se il treasury non copre tutto, rifiuto esplicito
+- **Preflight economico dinamico**: `dev_buy + fee (1,75%) + rent create +
+  rent_ATA×N + fee_rete + priority_fee + tip` calcolato prima di firmare;
+  rent ATA Token-2022 per 36 utenti ≈ 0.075 SOL; se il treasury non copre
+  tutto, rifiuto esplicito
+- **Tetto del dev buy**: oltre ~86 SOL nella curva (raccolta ~95,6 SOL) la
+  distribuzione supererebbe le riserve reali: lancio rifiutato
 - **Esiti bundle mai ambigui**: `getInflightBundleStatuses` fino a
   Landed/Failed, poi `getBundleStatuses` per la conferma; timeout =
   esito sconosciuto → riconciliazione manuale su Solscan, **mai retry
@@ -68,22 +71,35 @@ Per il lancio servono anche: `PINATA_JWT` (metadati IPFS),
 `TOKEN_NAME`/`TOKEN_SYMBOL`/`TOKEN_IMAGE_PATH`, e un RPC mainnet
 (Helius/QuickNode).
 
-## Test
+## Test e validazione
 
 ```bash
-pytest tests/ -q
+pip install -r requirements-dev.txt
+pytest -q                                   # unit, property-based, LiteSVM
+ruff check . && mypy                        # lint + tipi
+JABBA_FORK=1 pytest tests/test_fork_mainnet.py -s   # lancio su fork mainnet
 ```
 
-52 test: presale (contributi, rimborsi, shares), invariante distribuzione
-in base-unit interi (Σ quote + team + dust == distribuito, per
-1/15/30/36 utenti), chunking (rifiuto per 37/45/46/100), parametri curva
-pump.fun verificati on-chain, macchina a stati Jito (inflight + conferme,
-casi malformati), preflight costi (rent ATA), costruzione/firma tx
-offline, UI.
+| Livello | Cosa verifica |
+|---|---|
+| property-based (hypothesis) | curva, distribuzione in base-unit interi, chunking, ledger a stati |
+| handler | flussi Telegram, race (doppio rimborso), validazione wallet |
+| **LiteSVM** (`tests/test_svm.py`) | il codice vero di `Chain` eseguito su una SVM reale: rimborsi, depositi rilevati end-to-end, distribuzione Token-2022 / SPL a 36 utenti con tip |
+| **fork mainnet** (opt-in) | `run_launch` vero: tx create+dev buy reale da PumpPortal, programmi pump.fun clonati da mainnet in LiteSVM, bundle eseguito in ordine. Nulla viene inviato a mainnet |
 
-**Non coperto** (mainnet-only): atterraggio reale del bundle e
-comportamento PumpPortal in produzione → primo lancio in piccolo
-(0.1 SOL di dev buy).
+Il fork gira ogni notte in CI e a richiesta (`workflow_dispatch`): rilancialo
+sempre prima di un lancio vero, intercetta cambi di pump.fun o PumpPortal
+(fee, formato tx, token program). RPC configurabile con il secret
+`JABBA_FORK_RPC`.
+
+I bug noti e non ancora corretti sono test `xfail(strict=True)` con motivo
+`BUG: ...`: quando vengono sistemati il test diventa rosso e il marcatore
+va tolto.
+
+Fatti misurati sul fork (2026-11): il mint pump.fun è **Token-2022**;
+`amount` è SOL che entra nella curva e i token sono esattamente
+`floor(VTR0·S/(VSR0+S))`; fee **in aggiunta**: 0,95% protocollo + 0,30%
+creator + 0,50% PumpPortal; ~0,0122 SOL di rent una tantum per la create.
 
 ## Struttura
 
@@ -104,7 +120,7 @@ curvebot/
   chart.py      PNG curva pump.fun attesa (dev buy marcato)
   config.py     configurazione da env
   main.py       entry point
-tests/          52 test
+tests/          suite completa (vedi Test e validazione)
 SPEC.md         specifica tecnica completa
 ```
 

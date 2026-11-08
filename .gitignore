@@ -4,3 +4,9 @@ __pycache__/
 curvebot.db
 treasury.json
 .pytest_cache/
+
+# keys and local state: never commit
+*.db
+*keypair*.json
+treasury*.json
+.coverage

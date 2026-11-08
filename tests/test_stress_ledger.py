@@ -6,11 +6,11 @@ import sqlite3
 from fractions import Fraction
 
 import pytest
+from conftest import finding
 from hypothesis import settings
 from hypothesis import strategies as st
-from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
+from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
 
-from conftest import finding
 from curvebot import db, service
 
 UIDS = st.sampled_from([1, 2, 3, 4, 5])
@@ -94,7 +94,7 @@ def test_float_residue_after_partial_refunds(conn):
     # documents: quotes keep being accepted for sub-lamport amounts
     if left > 0:
         q = service.refund_quote(conn, 1, 1.0, 30)
-        assert int(round(q["net_sol"] * 1e9)) == 0  # a 0-lamport transfer would be sent
+        assert round(q["net_sol"] * 1e9) == 0  # a 0-lamport transfer would be sent
 
 
 @finding("refund_quote accepts sub-lamport refunds (net rounds to 0 lamports)")

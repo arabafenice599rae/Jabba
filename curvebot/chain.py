@@ -1,24 +1,73 @@
-"""Solana chain operations (minimal: one address, SOL in / SOL out).
+"""Solana chain operations: one treasury address, SOL in / SOL out, and the
+token distribution transactions of the atomic launch.
 
-No on-chain token exists: balances are database entries only.
 Imports solana libs lazily so pure logic is testable offline.
+
+pump.fun mints are Token-2022 (create_v2): every token instruction and every
+ATA derivation must use the mint's own token program, never a hardcoded one.
 """
 
 from __future__ import annotations
 
+import logging
+from typing import Any
+
+log = logging.getLogger("chain")
+
 LAMPORTS = 1_000_000_000
+SYSTEM_PROGRAM = "11111111111111111111111111111111"
+TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+TOKEN_DECIMALS = 6
+
+JITO_TIP_ACCOUNTS = [
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+]
+JITO_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
+
+
+def Pubkey_from(s: str):
+    from solders.pubkey import Pubkey
+    return Pubkey.from_string(s)
+
+
+def is_valid_wallet(s: str) -> bool:
+    """A base58 32-byte public key (on- or off-curve, PDAs allowed)."""
+    try:
+        return len(bytes(Pubkey_from(s))) == 32 and s != SYSTEM_PROGRAM
+    except Exception:  # noqa: BLE001 - any parse error means "not a pubkey"
+        return False
+
+
+def token_program_of_create_tx(raw: bytes) -> str:
+    """Token program the PumpPortal create tx will mint under, read from its
+    static account keys (pump.fun create_v2 -> Token-2022)."""
+    from solders.transaction import VersionedTransaction
+
+    keys = {str(k) for k in VersionedTransaction.from_bytes(raw).message.account_keys}
+    if TOKEN_2022_PROGRAM in keys:
+        return TOKEN_2022_PROGRAM
+    if TOKEN_PROGRAM in keys:
+        return TOKEN_PROGRAM
+    raise RuntimeError("tx di creazione senza token program riconoscibile")
 
 
 class Chain:
     def __init__(self, rpc_url: str, keypair_path: str):
-        import json
-
-        from solders.keypair import Keypair
         from solana.rpc.async_api import AsyncClient
+        from solders.keypair import Keypair
 
         with open(keypair_path) as f:
             self.keypair = Keypair.from_json(f.read())
-        self.client = AsyncClient(rpc_url)
+        self.client: Any = AsyncClient(rpc_url)
+        self._blockhash: Any = None
 
     @property
     def pubkey(self) -> str:
@@ -28,20 +77,35 @@ class Chain:
         resp = await self.client.get_balance(self.keypair.pubkey())
         return resp.value / LAMPORTS
 
+    async def refresh_blockhash(self) -> None:
+        bh = await self.client.get_latest_blockhash()
+        self._blockhash = bh.value.blockhash
+
+    def _sign(self, ixs: list, extra_signers=None):
+        """Signed tx for `ixs` with the cached blockhash, treasury as payer."""
+        from solders.message import Message
+        from solders.transaction import VersionedTransaction
+
+        msg = Message.new_with_blockhash(ixs, self.keypair.pubkey(), self._blockhash)
+        return VersionedTransaction(msg, [self.keypair, *(extra_signers or [])])
+
     async def send_sol(self, destination_wallet: str, amount_sol: float) -> str:
         """Send SOL from the treasury address. Returns the tx signature."""
-        from solders.pubkey import Pubkey
         from solders.system_program import TransferParams, transfer
-        from solders.transaction import Transaction
 
+        lamports = round(amount_sol * LAMPORTS)
+        if lamports <= 0:
+            raise ValueError("importo nullo")
         ix = transfer(TransferParams(
             from_pubkey=self.keypair.pubkey(),
-            to_pubkey=Pubkey.from_string(destination_wallet),
-            lamports=int(round(amount_sol * LAMPORTS)),
+            to_pubkey=Pubkey_from(destination_wallet),
+            lamports=lamports,
         ))
-        txn = Transaction.new_signed_with_payer([ix], self.keypair)
-        resp = await self.client.send_transaction(txn)
+        await self.refresh_blockhash()
+        resp = await self.client.send_transaction(self._sign([ix]))
         return str(resp.value)
+
+    # --- deposits ---
 
     async def incoming_sol_transfers(self, max_signatures: int = 25) -> list[dict]:
         """SOL transfers TO the treasury address. Returns dicts with
@@ -76,7 +140,7 @@ class Chain:
         import base58
         from solders.pubkey import Pubkey
 
-        system_program = Pubkey.from_string("11111111111111111111111111111111")
+        system_program = Pubkey.from_string(SYSTEM_PROGRAM)
         try:
             inner = tx_value.transaction
             tx = getattr(inner, "transaction", inner)
@@ -99,100 +163,62 @@ class Chain:
                 dst = keys[instr.accounts[1]]
                 if dst == me:
                     return {"sender": str(src), "amount_sol": lamports / LAMPORTS}
-        except Exception:
+        except (AttributeError, IndexError, TypeError, ValueError):
+            log.exception("tx non interpretabile, ignorata")
             return None
         return None
 
     # --- launch support (pump.fun) ---
 
-    def sign_b58(self, tx_b58: str, extra_signers=None) -> bytes:
-        """Sign a base58 PumpPortal transaction; returns signed tx bytes."""
-        import base58
+    def sign_versioned(self, raw: bytes, extra_signers=None) -> bytes:
+        """Sign an unsigned PumpPortal transaction (raw bytes, as returned by
+        /api/trade-local); returns the signed wire bytes."""
         from solders.transaction import VersionedTransaction
 
-        raw = base58.b58decode(tx_b58)
         txn = VersionedTransaction.from_bytes(raw)
-        signers = [self.keypair] + list(extra_signers or [])
+        signers = [self.keypair, *(extra_signers or [])]
         return bytes(VersionedTransaction(txn.message, signers))
-
-    async def sign_send_b58(self, tx_b58: str, extra_signers=None) -> str:
-        import base64
-
-        from solders.transaction import VersionedTransaction
-
-        signed = self.sign_b58(tx_b58, extra_signers)
-        txn = VersionedTransaction.from_bytes(signed)
-        resp = await self.client.send_transaction(txn)
-        return str(resp.value)
-
-    async def token_balance(self, mint: str) -> float:
-        """Token balance of the treasury's ATA for `mint` (ui units)."""
-        from spl.token.async_client import AsyncToken
-        from spl.token.constants import TOKEN_PROGRAM_ID
-
-        token = AsyncToken(self.client, Pubkey_from(mint), TOKEN_PROGRAM_ID,
-                           self.keypair)
-        ata = token.get_or_create_associated_token_account(self.keypair.pubkey())
-        acct = await token.get_account_by_owner(self.keypair.pubkey())
-        if acct.value is None:
-            return 0.0
-        return acct.value.amount / 10 ** 6
-
-    async def transfer_tokens(self, mint: str, destination_wallet: str,
-                              ui_amount: float) -> str:
-        """Create the destination ATA if needed and transfer tokens."""
-        from spl.token.async_client import AsyncToken
-        from spl.token.constants import TOKEN_PROGRAM_ID
-        from .pump_curve import ui_to_base
-
-        token = AsyncToken(self.client, Pubkey_from(mint), TOKEN_PROGRAM_ID,
-                           self.keypair)
-        dest_ata = await token.create_associated_token_account(
-            Pubkey_from(destination_wallet), self.keypair)
-        src_ata = await token.create_associated_token_account(
-            self.keypair.pubkey(), self.keypair)
-        resp = await token.transfer(src_ata, dest_ata, self.keypair,
-                                    ui_to_base(ui_amount))
-        return str(resp.value)
-
 
     def build_distribution_tx(self, mint: str,
                               recipients: list[tuple[str, int]],
                               tip_lamports: int = 0,
-                              tip_account: str = "") -> bytes:
+                              tip_account: str = "",
+                              token_program: str = TOKEN_2022_PROGRAM) -> bytes:
         """All transfers in ONE transaction: create destination ATAs
         (idempotent) and transfer tokens to every recipient. Amounts are
-        in BASE UNITS (10**DECIMALS, i.e. 10**6 for pump.fun tokens).
-        Optionally appends a Jito tip transfer. Returns signed tx bytes."""
-        import solders.transaction as txmod
-        from spl.token.constants import TOKEN_PROGRAM_ID
+        INTEGER base units (10**6). `token_program` must be the mint's
+        program (Token-2022 for pump.fun). Optionally appends a Jito tip
+        transfer. Returns signed tx bytes."""
         from spl.token.instructions import (
             create_idempotent_associated_token_account,
             get_associated_token_address,
+            models,
             transfer_checked,
         )
-        from spl.token.instructions import models
 
+        program = Pubkey_from(token_program)
         mint_pk = Pubkey_from(mint)
         owner = self.keypair.pubkey()
-        src_ata = get_associated_token_address(owner, mint_pk)
+        src_ata = get_associated_token_address(owner, mint_pk, program)
         ixs = []
         for wallet, amount in recipients:
+            if type(amount) is not int:
+                raise TypeError(f"importo non intero per {wallet}: {amount!r}")
             if amount <= 0:
                 continue
             dest_pk = Pubkey_from(wallet)
-            dest_ata = get_associated_token_address(dest_pk, mint_pk)
+            dest_ata = get_associated_token_address(dest_pk, mint_pk, program)
             ixs.append(create_idempotent_associated_token_account(
-                payer=owner, owner=dest_pk, mint=mint_pk,
+                payer=owner, owner=dest_pk, mint=mint_pk, token_program_id=program,
             ))
             ixs.append(transfer_checked(models.TransferCheckedParams(
-                program_id=TOKEN_PROGRAM_ID,
+                program_id=program,
                 source=src_ata,
                 mint=mint_pk,
                 dest=dest_ata,
                 owner=owner,
                 amount=amount,
-                decimals=6,
+                decimals=TOKEN_DECIMALS,
                 signers=[owner],
             )))
         if tip_lamports > 0 and tip_account:
@@ -204,22 +230,18 @@ class Chain:
             )))
         if not ixs:
             return b""
-        txn = txmod.Transaction.new_signed_with_payer(
-            ixs, owner, [self.keypair], self._blockhash)
-        return bytes(txn)
-
-    async def refresh_blockhash(self):
-        bh = await self.client.get_latest_blockhash()
-        self._blockhash = bh.value.blockhash
+        return bytes(self._sign(ixs))
 
     async def transfer_tokens_batch(self, mint: str,
-                                    recipients: list[tuple[str, float]]) -> str:
+                                    recipients: list[tuple[str, int]],
+                                    token_program: str = TOKEN_2022_PROGRAM) -> str:
         await self.refresh_blockhash()
-        signed = self.build_distribution_tx(mint, recipients)
+        signed = self.build_distribution_tx(mint, recipients,
+                                            token_program=token_program)
         if not signed:
             return ""
-        from solders.transaction import Transaction
-        resp = await self.client.send_transaction(Transaction.from_bytes(signed))
+        from solders.transaction import VersionedTransaction
+        resp = await self.client.send_transaction(VersionedTransaction.from_bytes(signed))
         return str(resp.value)
 
     async def send_bundle(self, http, txs_bytes: list[bytes]) -> str:
@@ -231,8 +253,7 @@ class Chain:
             "params": [[base64.b64encode(t).decode() for t in txs_bytes],
                        {"encoding": "base64"}],
         }
-        url = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
-        async with http.post(url, json=payload) as r:
+        async with http.post(JITO_URL, json=payload) as r:
             data = await r.json()
         if "error" in data:
             raise RuntimeError(f"jito bundle rejected: {data['error']}")
@@ -242,36 +263,11 @@ class Chain:
         """Tip accounts can rotate: fetch them live, fall back to the list."""
         payload = {"jsonrpc": "2.0", "id": 1, "method": "getTipAccounts",
                    "params": []}
-        url = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
         try:
-            async with http.post(url, json=payload) as r:
+            async with http.post(JITO_URL, json=payload) as r:
                 data = await r.json()
             if data.get("result"):
                 return data["result"]
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - network fallback is intended
+            log.warning("getTipAccounts non disponibile, uso la lista statica")
         return JITO_TIP_ACCOUNTS
-
-    def _system_program(self):
-        from solders.pubkey import Pubkey
-        return Pubkey.from_string("11111111111111111111111111111111")
-def self_token_decimals(chain) -> int:
-    return 9  # pump.fun tokens use 9 decimals
-
-
-
-def Pubkey_from(s: str):
-    from solders.pubkey import Pubkey
-    return Pubkey.from_string(s)
-
-
-JITO_TIP_ACCOUNTS = [
-    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
-    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
-    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
-    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
-    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
-    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
-    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
-]

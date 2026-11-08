@@ -14,13 +14,13 @@ from types import SimpleNamespace
 
 import base58
 import pytest
+from conftest import finding
 from solders.hash import Hash
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.system_program import TransferParams, transfer
 from solders.transaction import Transaction
 
-from conftest import finding
 from curvebot import db
 from curvebot.chain import Chain
 from curvebot.monitor import DepositMonitor
@@ -164,7 +164,7 @@ def test_monitor_ignores_unknown_and_below_min(db_path, cfg):
 
 def test_monitor_idempotent_across_polls(db_path, cfg):
     t = [{"signature": "s1", "slot": 1, "sender": "WALLET_A", "amount_sol": 2.0}]
-    m1 = _run_monitor(db_path, cfg, t, {1: "WALLET_A"})
+    _run_monitor(db_path, cfg, t, {1: "WALLET_A"})
     # second poll, same history, fresh monitor (restart): sig already seen
     m2 = DepositMonitor(FakeChainRPC(t), cfg, lambda: db.connect(db_path))
     asyncio.run(m2._poll_sol_deposits())

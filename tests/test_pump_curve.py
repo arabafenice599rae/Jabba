@@ -1,9 +1,17 @@
-import pytest
 
-from curvebot.pump_curve import (DECIMALS, PROTOCOL_FEE_BPS, RTR0, SUPPLY,
-                                 TOTAL_FEE_BPS, VSR0, VTR0, params_match,
-                                 tokens_out_for_sol, ui_to_base,
-                                 verify_params)
+from curvebot.pump_curve import (
+    DECIMALS,
+    PROTOCOL_FEE_BPS,
+    RTR0,
+    SUPPLY,
+    TOTAL_FEE_BPS,
+    VSR0,
+    VTR0,
+    params_match,
+    tokens_out_for_sol,
+    ui_to_base,
+    verify_params,
+)
 
 
 def test_zero():
@@ -52,7 +60,8 @@ def test_verify_params_layout():
     raw = bytearray(128)
     raw[:8] = bytes.fromhex("a7e8e8b1c86c727f")
     def put(off, val): raw[off:off+8] = val.to_bytes(8, "little")
-    put(73, VTR0); put(81, VSR0); put(89, RTR0); put(97, SUPPLY); put(105, 95)
+    for off, val in ((73, VTR0), (81, VSR0), (89, RTR0), (97, SUPPLY), (105, 95)):
+        put(off, val)
     decoded = verify_params(bytes(raw))
     assert params_match(decoded)
 

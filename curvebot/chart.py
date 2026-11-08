@@ -13,7 +13,7 @@ def render_pump_curve_png(dev_buy_sol: float = 0.0) -> bytes:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from .pump_curve import VSR0, VTR0, DECIMALS, tokens_out_for_sol
+    from .pump_curve import DECIMALS, VSR0, VTR0, tokens_out_for_sol
 
     # marginal price (SOL per token) after s tokens (ui) sold:
     # p = (VSR0/1e9) / (1 - s_ui/1e9)  -- derived from constant product
@@ -22,7 +22,9 @@ def render_pump_curve_png(dev_buy_sol: float = 0.0) -> bytes:
         k = (VSR0 / 1_000_000_000) * VTR0 / remaining_base
         return k / 10 ** DECIMALS
 
-    dev_tokens = tokens_out_for_sol(dev_buy_sol) if dev_buy_sol > 0 else 0.0
+    # tokens_out_for_sol returns BASE units; the chart works in UI tokens
+    dev_tokens = (tokens_out_for_sol(dev_buy_sol) / 10 ** DECIMALS
+                  if dev_buy_sol > 0 else 0.0)
     x_max = max(dev_tokens * 1.6, 100_000_000.0)
     steps = 240
     xs = [x_max * i / steps for i in range(steps + 1)]

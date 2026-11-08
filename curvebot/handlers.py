@@ -3,15 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InaccessibleMessage,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from . import db, service
+from .chain import is_valid_wallet
 from .keyboards import back_to_menu, main_menu
 from .pump_curve import tokens_out_for_sol
 
+log = logging.getLogger("handlers")
 router = Router()
 
 PENDING_REFUNDS: dict[int, dict] = {}
@@ -23,6 +33,18 @@ def _refund_lock(user_id: int) -> asyncio.Lock:
     if lock is None:
         lock = _REFUND_LOCKS[user_id] = asyncio.Lock()
     return lock
+
+
+def _uid(update: Message | CallbackQuery) -> int:
+    """Sender id; 0 (never whitelisted) for updates without a user."""
+    return update.from_user.id if update.from_user else 0
+
+
+def _msg(call: CallbackQuery) -> Message | None:
+    """The callback's message, if the bot can still act on it."""
+    if call.message is None or isinstance(call.message, InaccessibleMessage):
+        return None
+    return call.message
 
 
 def _guard(cfg, user_id: int) -> bool:
@@ -37,8 +59,9 @@ def _est_tokens(conn, cfg, contribution: float) -> float:
     if raised <= 0:
         return 0.0
     dev_buy = raised * (100.0 - cfg.team_keep_percent) / 100.0
+    # tokens are split pro rata of ONE dev buy, not bought one user at a time
     expected = tokens_out_for_sol(dev_buy)
-    user_share = tokens_out_for_sol(dev_buy * contribution / raised)
+    user_share = expected * contribution / raised
     return user_share * (1 - cfg.team_share_bps / 10_000.0)
 
 
@@ -60,10 +83,19 @@ def _fmt_info(cfg, conn, chain_pubkey: str, sol: float) -> str:
     )
 
 
+async def _reply(call: CallbackQuery, text: str) -> None:
+    msg = _msg(call)
+    if msg is not None:
+        await msg.answer(text)
+
+
 async def _edit(call: CallbackQuery, text: str, markup=None):
+    msg = _msg(call)
     try:
-        await call.message.edit_text(text, reply_markup=markup)
-    except Exception:
+        if msg is None:
+            raise LookupError("message not accessible")
+        await msg.edit_text(text, reply_markup=markup)
+    except Exception:  # noqa: BLE001 - "message not modified" & co: just ack
         await call.answer()
 
 
@@ -71,7 +103,7 @@ async def _edit(call: CallbackQuery, text: str, markup=None):
 
 @router.message(Command("start", "help", "menu"))
 async def cmd_start(message: Message, cfg, conn, chain):
-    if not _guard(cfg, message.from_user.id):
+    if not _guard(cfg, _uid(message)):
         return
     sol = await chain.balance_sol()
     await message.answer(_fmt_info(cfg, conn, chain.pubkey, sol),
@@ -80,7 +112,7 @@ async def cmd_start(message: Message, cfg, conn, chain):
 
 @router.message(Command("info"))
 async def cmd_info(message: Message, cfg, conn, chain):
-    if not _guard(cfg, message.from_user.id):
+    if not _guard(cfg, _uid(message)):
         return
     sol = await chain.balance_sol()
     await message.answer(_fmt_info(cfg, conn, chain.pubkey, sol))
@@ -88,9 +120,9 @@ async def cmd_info(message: Message, cfg, conn, chain):
 
 @router.message(Command("position"))
 async def cmd_position(message: Message, cfg, conn):
-    if not _guard(cfg, message.from_user.id):
+    if not _guard(cfg, _uid(message)):
         return
-    c = db.user_contribution(conn, message.from_user.id)
+    c = db.user_contribution(conn, _uid(message))
     raised = db.total_raised(conn)
     share = c / raised * 100 if raised > 0 else 0
     est = _est_tokens(conn, cfg, c)
@@ -104,9 +136,9 @@ async def cmd_position(message: Message, cfg, conn):
 
 @router.message(Command("refund"))
 async def cmd_refund(message: Message, cfg, conn):
-    if not _guard(cfg, message.from_user.id):
+    if not _guard(cfg, _uid(message)):
         return
-    c = db.user_contribution(conn, message.from_user.id)
+    c = db.user_contribution(conn, _uid(message))
     if c <= 0:
         await message.answer("Nessun contributo da rimborsare.")
         return
@@ -125,21 +157,22 @@ async def cmd_refund(message: Message, cfg, conn):
 
 @router.message(Command("setwallet"))
 async def cmd_setwallet(message: Message, command: CommandObject, cfg, conn):
-    if not _guard(cfg, message.from_user.id):
+    if not _guard(cfg, _uid(message)):
         return
     wallet = (command.args or "").strip()
-    if not wallet or len(wallet) < 32:
-        await message.answer("Uso: <code>/setwallet &lt;pubkey&gt;</code>")
+    if not is_valid_wallet(wallet):
+        await message.answer("Uso: <code>/setwallet &lt;pubkey&gt;</code> "
+                             "(indirizzo Solana valido)")
         return
-    db.set_wallet(conn, message.from_user.id, wallet)
+    db.set_wallet(conn, _uid(message), wallet)
     await message.answer(f"✅ Wallet registrato:\n<code>{wallet}</code>")
 
 
 @router.message(Command("launch"))
 async def cmd_launch(message: Message, cfg, conn):
-    if not _guard(cfg, message.from_user.id):
+    if not _guard(cfg, _uid(message)):
         return
-    if message.from_user.id != cfg.allowed_ids[0]:
+    if _uid(message) != cfg.allowed_ids[0]:
         await message.answer("Solo l'amministratore può lanciare.")
         return
     if db.get_meta(conn, "state") == "launched":
@@ -185,7 +218,7 @@ async def cmd_launch(message: Message, cfg, conn):
 
 @router.callback_query(F.data == "menu:back")
 async def cb_back(call: CallbackQuery, cfg, conn, chain):
-    if not _guard(cfg, call.from_user.id):
+    if not _guard(cfg, _uid(call)):
         return await call.answer()
     sol = await chain.balance_sol()
     await _edit(call, _fmt_info(cfg, conn, chain.pubkey, sol), main_menu())
@@ -193,7 +226,7 @@ async def cb_back(call: CallbackQuery, cfg, conn, chain):
 
 @router.callback_query(F.data == "menu:info")
 async def cb_info(call: CallbackQuery, cfg, conn, chain):
-    if not _guard(cfg, call.from_user.id):
+    if not _guard(cfg, _uid(call)):
         return await call.answer()
     sol = await chain.balance_sol()
     await _edit(call, _fmt_info(cfg, conn, chain.pubkey, sol), back_to_menu())
@@ -202,9 +235,9 @@ async def cb_info(call: CallbackQuery, cfg, conn, chain):
 
 @router.callback_query(F.data == "menu:position")
 async def cb_position(call: CallbackQuery, cfg, conn):
-    if not _guard(cfg, call.from_user.id):
+    if not _guard(cfg, _uid(call)):
         return await call.answer()
-    c = db.user_contribution(conn, call.from_user.id)
+    c = db.user_contribution(conn, _uid(call))
     raised = db.total_raised(conn)
     share = c / raised * 100 if raised > 0 else 0
     est = _est_tokens(conn, cfg, c)
@@ -219,7 +252,7 @@ async def cb_position(call: CallbackQuery, cfg, conn):
 
 @router.callback_query(F.data == "menu:howbuy")
 async def cb_howbuy(call: CallbackQuery, cfg):
-    if not _guard(cfg, call.from_user.id):
+    if not _guard(cfg, _uid(call)):
         return await call.answer()
     await _edit(call, (
         "💰 <b>Come partecipare</b>\n\n"
@@ -235,34 +268,37 @@ async def cb_howbuy(call: CallbackQuery, cfg):
 
 @router.callback_query(F.data == "menu:chart")
 async def cb_chart(call: CallbackQuery, cfg, conn):
-    if not _guard(cfg, call.from_user.id):
+    if not _guard(cfg, _uid(call)):
         return await call.answer()
     from .chart import render_pump_curve_png
     raised = db.total_raised(conn)
     png = render_pump_curve_png(dev_buy_sol=raised * (100.0 - cfg.team_keep_percent) / 100.0)
-    await call.message.answer_photo(
-        png, caption="📈 <b>Curva pump.fun attesa</b> (dev buy al lancio)",
+    msg = _msg(call)
+    if msg is None:
+        return await call.answer()
+    await msg.answer_photo(
+        BufferedInputFile(png, filename="curva.png"), caption="📈 <b>Curva pump.fun attesa</b> (dev buy al lancio)",
         reply_markup=back_to_menu())
     await call.answer()
 
 
 @router.callback_query(F.data.startswith("refund:amt:"))
 async def cb_refund_amt(call: CallbackQuery, cfg, conn):
-    if not _guard(cfg, call.from_user.id):
+    if not _guard(cfg, _uid(call)):
         return await call.answer()
     if db.get_meta(conn, "state") == "launched":
         await call.answer("Presale già lanciato: rimborsi chiusi.",
                           show_alert=True)
         return
-    pct = int(call.data.split(":")[2])
+    pct = int((call.data or "").split(":")[2])
     try:
-        quote = service.refund_quote(conn, call.from_user.id, pct / 100.0,
+        quote = service.refund_quote(conn, _uid(call), pct / 100.0,
                                      cfg.refund_fee_bps)
     except ValueError as e:
         await call.answer(str(e), show_alert=True)
         return
     quote["fraction"] = pct / 100.0
-    PENDING_REFUNDS[call.from_user.id] = quote
+    PENDING_REFUNDS[_uid(call)] = quote
     await _edit(call, (
         f"↩️ <b>Conferma rimborso</b>\n\n"
         f"💰 Rimborso: <code>{quote['refund_sol']:.4f} SOL</code> ({pct}%)\n"
@@ -279,26 +315,26 @@ async def cb_refund_amt(call: CallbackQuery, cfg, conn):
 
 @router.callback_query(F.data == "refund:go")
 async def cb_refund_go(call: CallbackQuery, cfg, conn, chain):
-    if not _guard(cfg, call.from_user.id):
+    if not _guard(cfg, _uid(call)):
         return await call.answer()
-    pending = PENDING_REFUNDS.pop(call.from_user.id, None)
+    pending = PENDING_REFUNDS.pop(_uid(call), None)
     if pending is None:
         await call.answer("Quotazione scaduta, ripeti.", show_alert=True)
         return
     # One refund at a time per user, and the amount is RE-QUOTED against the
     # ledger inside the lock: a quote computed before a concurrent refund was
     # recorded can never be paid out.
-    async with _refund_lock(call.from_user.id):
+    async with _refund_lock(_uid(call)):
         if db.get_meta(conn, "state") == "launched":
             await call.answer("Presale già lanciato.", show_alert=True)
             return
-        wallet = db.get_wallet(conn, call.from_user.id)
+        wallet = db.get_wallet(conn, _uid(call))
         if not wallet:
             await _edit(call, "Registra prima il wallet: /setwallet <pubkey>",
                         back_to_menu())
             return
         try:
-            quote = service.refund_quote(conn, call.from_user.id,
+            quote = service.refund_quote(conn, _uid(call),
                                          pending["fraction"], cfg.refund_fee_bps)
         except ValueError as e:
             await call.answer(str(e), show_alert=True)
@@ -311,9 +347,10 @@ async def cb_refund_go(call: CallbackQuery, cfg, conn, chain):
         try:
             sig = await chain.send_sol(wallet, quote["net_sol"])
         except Exception:
+            log.exception("refund send_sol failed")
             await _edit(call, "❌ Invio SOL fallito, riprova.", back_to_menu())
             return
-        service.confirm_refund(conn, call.from_user.id, quote["refund_sol"],
+        service.confirm_refund(conn, _uid(call), quote["refund_sol"],
                                quote["fee_sol"], signature=sig)
     await _edit(call, (
         f"✅ <b>Rimborso completato</b>\n\n"
@@ -326,14 +363,14 @@ async def cb_refund_go(call: CallbackQuery, cfg, conn, chain):
 
 @router.callback_query(F.data == "refund:cancel")
 async def cb_refund_cancel(call: CallbackQuery, cfg):
-    PENDING_REFUNDS.pop(call.from_user.id, None)
+    PENDING_REFUNDS.pop(_uid(call), None)
     await _edit(call, "❌ Rimborso annullato.", back_to_menu())
     await call.answer()
 
 
 @router.callback_query(F.data == "launch:cancel")
 async def cb_launch_cancel(call: CallbackQuery, cfg):
-    if not _guard(cfg, call.from_user.id):
+    if not _guard(cfg, _uid(call)):
         return await call.answer()
     await _edit(call, "❌ Lancio annullato.")
     await call.answer()
@@ -341,9 +378,9 @@ async def cb_launch_cancel(call: CallbackQuery, cfg):
 
 @router.callback_query(F.data == "launch:go")
 async def cb_launch_go(call: CallbackQuery, cfg, conn, chain):
-    if not _guard(cfg, call.from_user.id):
+    if not _guard(cfg, _uid(call)):
         return await call.answer()
-    if call.from_user.id != cfg.allowed_ids[0]:
+    if _uid(call) != cfg.allowed_ids[0]:
         return await call.answer("Solo l'admin.", show_alert=True)
     if db.get_meta(conn, "state") == "launched":
         return await call.answer("Già lanciato.", show_alert=True)
@@ -355,9 +392,10 @@ async def cb_launch_go(call: CallbackQuery, cfg, conn, chain):
         try:
             report = await run_launch(chain, cfg, conn, http)
         except Exception as e:
-            await call.message.answer(f"❌ Lancio fallito: {e}")
+            log.exception("launch aborted")
+            await _reply(call, f"❌ Lancio fallito: {e}")
             return
-    await call.message.answer(
+    await _reply(call, 
         f"🚀 <b>LANCIATO!</b>\n\n"
         f"🪙 <code>{report['mint']}</code>\n"
         f"🔗 pump.fun/coin/{report['mint']}\n"

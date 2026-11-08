@@ -5,13 +5,11 @@ from __future__ import annotations
 from fractions import Fraction
 
 import pytest
-from hypothesis import HealthCheck, assume, given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from conftest import finding
 from curvebot import pump_curve as pc
-from curvebot.launch import (CHUNK_SIZE, MAX_PARTICIPANTS, compute_distribution,
-                             plan_chunks)
+from curvebot.launch import CHUNK_SIZE, MAX_PARTICIPANTS, compute_distribution, plan_chunks
 
 SETTINGS = settings(max_examples=1500, deadline=None,
                     suppress_health_check=[HealthCheck.too_slow])
@@ -47,10 +45,9 @@ def test_curve_concave_split_buys_never_beat_single(a, b):
 @SETTINGS
 @given(st.floats(min_value=0.001, max_value=80.0))
 def test_curve_matches_exact_rational(s):
-    net = int(s * 1_000_000_000 * (1 - pc.TOTAL_FEE_BPS / 10_000))
-    exact = Fraction(pc.VTR0 * net, pc.VSR0 + net)
-    out = pc.tokens_out_for_sol(s)
-    assert out == int(exact)  # floor, no float drift
+    lam = round(s * 1_000_000_000)
+    exact = Fraction(pc.VTR0 * lam, pc.VSR0 + lam)
+    assert pc.tokens_out_for_sol(s) == min(int(exact), pc.RTR0)  # floor, no float drift
 
 
 @pytest.mark.parametrize("s", [0, -1, -1e-12, float("-inf")])
@@ -58,19 +55,19 @@ def test_curve_non_positive(s):
     assert pc.tokens_out_for_sol(s) == 0
 
 
-def test_curve_fee_is_conservative_vs_onchain_fee_on_top():
-    """pump.fun charges the fee ON TOP of the curve cost: net = S/(1+f).
-    The code uses S*(1-f), which is smaller -> expected tokens is a
-    lower bound of what the dev buy really gets (safe direction)."""
-    for s in (0.1, 1, 10, 50, 80):
-        f = pc.TOTAL_FEE_BPS / 10_000
-        onchain_net = int(s * 1e9 / (1 + f))
-        onchain = pc.VTR0 * onchain_net // (pc.VSR0 + onchain_net)
-        assert pc.tokens_out_for_sol(s) <= onchain
+def test_curve_matches_mainnet_fork_measurement():
+    """Measured 2026-11-08 executing a real PumpPortal create (amount=1 SOL)
+    on a mainnet fork: the treasury ATA received exactly this many tokens."""
+    assert pc.tokens_out_for_sol(1.0) == 34_612_903_225_806
 
 
-@finding("no cap at real token reserves: a presale over ~95.6 SOL makes "
-         "expected > tokens actually purchasable -> distribution tx fails")
+def test_dev_buy_cost_matches_mainnet_fork_measurement():
+    """Same fork run: the treasury paid 1.030245679 SOL in total, i.e. the
+    cost below + 0.0005 priority fee + 2 signatures (10_000 lamports)."""
+    assert pc.dev_buy_total_cost_lamports(1.0) + 500_000 + 10_000 == \
+        pytest.approx(1_030_245_679, abs=2)
+
+
 @pytest.mark.parametrize("raised", [96.0, 120.0, 300.0])
 def test_curve_never_exceeds_real_reserves(raised):
     dev_buy = raised * 0.9
@@ -136,8 +133,6 @@ def test_distribution_invariants_float_weights(weights, tokens_base, team_bps, s
     _check(weights, tokens_base, team_bps, safety_bps)
 
 
-@finding("float weights from the REAL ledger yield float token amounts, "
-         "not integer base units")
 def test_distribution_amounts_are_ints_with_real_ledger_weights():
     out, _, _ = compute_distribution({1: 0.1, 2: 0.2, 3: 0.7}, pc.RTR0, 0, 10)
     assert all(type(s) is int for _, s in out)
@@ -165,15 +160,11 @@ def test_distribution_degenerate():
     assert compute_distribution({1: 0}, 10**9, 0, 0) == ([], 0, 0)
 
 
-def test_distribution_negative_weight_is_not_rejected():
-    """A negative net contribution (refund > deposit) reaching the
-    distribution would produce a negative share. run_launch filters c>0,
-    but compute_distribution itself has no guard."""
-    out, _, _ = compute_distribution({1: 10, 2: -1}, 10**9, 0, 0)
-    assert any(s < 0 for _, s in out)
+def test_distribution_rejects_negative_weight():
+    with pytest.raises(ValueError):
+        compute_distribution({1: 10, 2: -1}, 10**9, 0, 0)
 
 
-@finding("team_bps + safety_bps > 10000 gives negative distributable")
 def test_distribution_rejects_overflowing_bps():
     with pytest.raises(ValueError):
         compute_distribution({1: 1}, 10**9, 9_000, 2_000)

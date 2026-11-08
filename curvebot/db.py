@@ -1,7 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
 
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     telegram_id INTEGER PRIMARY KEY,
