@@ -319,3 +319,21 @@ class Chain:
         except Exception:  # noqa: BLE001 - network fallback is intended
             log.warning("getTipAccounts non disponibile, uso la lista statica")
         return JITO_TIP_ACCOUNTS
+
+    async def send_instructions(self, ixs) -> str:
+        """Build, sign and send a tx with arbitrary instructions."""
+        import solders.transaction as txmod
+
+        bh = await self.client.get_latest_blockhash()
+        txn = txmod.Transaction.new_signed_with_payer(
+            ixs, self.keypair.pubkey(), [self.keypair],
+            bh.value.blockhash)
+        resp = await self.client.send_transaction(txn)
+        return str(resp.value)
+
+    async def account_lamports(self, address: str) -> int:
+        """Lamports held by an account (0 if it does not exist)."""
+        resp = await self.client.get_account_info(Pubkey_from(address))
+        if resp.value is None:
+            return 0
+        return resp.value.lamports

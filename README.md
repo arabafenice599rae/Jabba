@@ -26,9 +26,11 @@ FASE 3 — MERCATO (automatico)
   (default 0,30%), chiuso dopo il lancio
 - **Quota**: `/position` mostra SOL contribuiti, % del totale e token
   stimati al lancio (matematica pump.fun deterministica)
-- **Lancio atomico**: create + dev buy in **una** transazione (PumpPortal
-  `trade-local`), poi la distribuzione in chunk — tutto in un bundle
-  Jito: o tutto riesce, o tutto torna indietro
+- **Lancio atomico**: create_v2 + buy_v3 costruite **direttamente sul
+  programma pump.fun** (solders, IDL ufficiale — niente intermediari,
+  niente fee di terzi, nessun programma esterno nel percorso dei fondi),
+  poi la distribuzione in chunk — tutto in un bundle Jito: o tutto
+  riesce, o tutto torna indietro
 - **Zero token al team**: `TEAM_SHARE_BPS=0`; il team trattiene solo il
   10% dei SOL (`TEAM_KEEP_PERCENT`)
 
@@ -85,10 +87,10 @@ JABBA_FORK=1 pytest tests/test_fork_mainnet.py -s   # lancio su fork mainnet
 | property-based (hypothesis) | curva, distribuzione in base-unit interi, chunking, ledger a stati |
 | handler | flussi Telegram, race (doppio rimborso), validazione wallet |
 | **LiteSVM** (`tests/test_svm.py`) | il codice vero di `Chain` eseguito su una SVM reale: rimborsi, depositi rilevati end-to-end, distribuzione Token-2022 / SPL a 36 utenti con tip |
-| **fork mainnet** (opt-in) | `run_launch` vero: tx create+dev buy reale da PumpPortal, programmi pump.fun clonati da mainnet in LiteSVM, bundle eseguito in ordine. Nulla viene inviato a mainnet |
+| **fork mainnet** (opt-in) | `run_launch` vero: tx create_v2+buy_v3 reali, programmi pump.fun clonati da mainnet in LiteSVM, bundle eseguito in ordine. Nulla viene inviato a mainnet |
 
 Il fork gira ogni notte in CI e a richiesta (`workflow_dispatch`): rilancialo
-sempre prima di un lancio vero, intercetta cambi di pump.fun o PumpPortal
+sempre prima di un lancio vero, intercetta cambi di pump.fun
 (fee, formato tx, token program). RPC configurabile con il secret
 `JABBA_FORK_RPC`.
 
@@ -98,7 +100,7 @@ va tolto.
 
 Prima del lancio vero, con la chiave e l'RPC reali e senza spendere SOL:
 `python scripts/dryrun.py --wallets 36 --dev-buy <SOL>` (parametri curva,
-create PumpPortal firmata e simulata, dimensioni tx, preventivo costi).
+create_v2+buy_v3 costruite e simulate, dimensioni tx, preventivo costi).
 
 **Stati che proteggono i fondi**
 - rimborso: preventivo (nessuna scrittura) → conferma = prenotazione
@@ -114,7 +116,7 @@ create PumpPortal firmata e simulata, dimensioni tx, preventivo costi).
 Fatti misurati sul fork (2026-11): il mint pump.fun è **Token-2022**;
 `amount` è SOL che entra nella curva e i token sono esattamente
 `floor(VTR0·S/(VSR0+S))`; fee **in aggiunta**: 0,95% protocollo + 0,30%
-creator + 0,50% PumpPortal; ~0,0122 SOL di rent una tantum per la create.
+creator; ~0,0122 SOL di rent una tantum per la create.
 
 ## Struttura
 
@@ -123,12 +125,12 @@ curvebot/
   service.py    ledger presale: depositi, rimborsi con fee, shares
   db.py         SQLite: users, ledger(deposit/refund), launches, meta,
                 processed_sigs (idempotenza)
-  chain.py      Solana: treasury, depositi, firma tx PumpPortal,
+  chain.py      Solana: treasury, depositi, invio tx generiche,
                 build_distribution_tx (ATA idempotenti + transfer_checked
                 + tip Jito), send_bundle, tip accounts
   monitor.py    polling RPC depositi → accredito contributi
   pump_curve.py matematica curva pump.fun (parametri VERIFICATI on-chain)
-  launch.py     PumpPortal client, distribuzione (invariante), chunking,
+  launch.py     dev buy dinamico, distribuzione (invariante), chunking,
                 preflight costi, macchina a stati bundle
   keyboards.py  layout bottoni inline
   handlers.py   comandi + callback (rimborso guidato, /launch admin)
@@ -157,6 +159,8 @@ doppia conferma.
 | `/position` | SOL contribuiti, % del presale, token stimati |
 | `/refund` | rimborso guidato con conferma (solo pre-lancio) |
 | `/launch` | (solo admin) lancio atomico su pump.fun |
+| `/sweep` | (solo admin) riscuote le creator fee dai vault (curva + PumpSwap) |
+| `/reconcile` | (solo admin) riconciliazione ledger ↔ blockchain |
 | `/reconcile` | (solo admin) confronto ledger ↔ chain in 6 categorie + risoluzione dei rimborsi `unknown`; non corregge nulla da solo |
 | `/launchresolve` | (solo admin) chiude un lancio con esito sconosciuto leggendo la chain: mint presente = atterrato, assente dopo 5 min = fallito |
 

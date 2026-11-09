@@ -28,7 +28,7 @@ FASE 3 — MERCATO (pump.fun, automatico)
 | Blockchain | Solana (solana-py 0.41, solders) |
 | Ledger | SQLite (file singolo) |
 | Grafico | matplotlib (PNG renderizzato on-demand) |
-| Launch API | PumpPortal local API (firma client-side) |
+| Istruzioni pump.fun | create_v2 + buy_v3 dirette (solders, IDL ufficiale) |
 | Atomicità | Jito Block Engine (bundle atomici) |
 | Test | pytest (42 test) |
 
@@ -41,13 +41,13 @@ curvebot/
 ├── db.py         SQLite: users(wallet), ledger(buy/sell), launches,
 │                 meta(state,mint), processed_sigs(idempotenza)
 ├── chain.py      Solana: keypair treasury, balance, send SOL,
-│                 parsing depositi in ingresso, firma tx PumpPortal,
+│                 parsing depositi in ingresso, invio tx generiche,
 │                 build_distribution_tx (ATA idempotenti + transfer_checked
 │                 + tip Jito), send_bundle, fetch_tip_accounts
 ├── monitor.py    Polling RPC depositi (ogni POLL_INTERVAL_S) → accredito
 ├── pump_curve.py Matematica curva pump.fun (VTR 1.073B/6dp, VSR 30 SOL,
 │                 fee 1.25%) → output dev buy deterministico
-├── launch.py     PumpPortal client + compute_distribution (proporzionale
+├── launch.py     dev buy dinamico + compute_distribution (proporzionale
 │                 esatto, dust→ultimo utente) + run_launch (bundle atomico)
 ├── keyboards.py  Layout bottoni inline
 ├── handlers.py   Comandi + callback (vendita guidata con conferma,
