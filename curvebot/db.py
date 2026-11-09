@@ -1,7 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
 
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     telegram_id INTEGER PRIMARY KEY,
@@ -32,6 +31,14 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS pending_refunds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_id INTEGER NOT NULL,
+    amount_sol REAL NOT NULL,
+    fee_sol REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending|unknown
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS processed_sigs (
     signature TEXT PRIMARY KEY,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -55,7 +62,7 @@ def open_conn(db_path: str) -> sqlite3.Connection:
 
 @contextmanager
 def connect(db_path: str):
-    conn = sqlite3.connect(db_path, timeout=10)
+    conn = sqlite3.connect(db_path, timeout=10, isolation_level=None)
     conn.row_factory = sqlite3.Row
     try:
         conn.executescript(SCHEMA)
@@ -139,3 +146,95 @@ def set_meta(conn: sqlite3.Connection, key: str, value: str) -> None:
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
     row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else None
+
+
+def insert_pending_refund(conn: sqlite3.Connection, telegram_id: int,
+                           amount_sol: float, fee_sol: float) -> int:
+    cur = conn.execute(
+        "INSERT INTO pending_refunds (telegram_id, amount_sol, fee_sol) "
+        "VALUES (?, ?, ?)",
+        (telegram_id, amount_sol, fee_sol),
+    )
+    assert cur.lastrowid is not None
+    return cur.lastrowid
+
+
+def pending_refund_total(conn: sqlite3.Connection, telegram_id: int) -> float:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount_sol), 0) AS t FROM pending_refunds "
+        "WHERE telegram_id = ?",
+        (telegram_id,),
+    ).fetchone()
+    return row["t"]
+
+
+def release_pending_refund(conn: sqlite3.Connection, refund_id: int) -> None:
+    conn.execute("DELETE FROM pending_refunds WHERE id = ?", (refund_id,))
+
+
+def get_pending_refund(conn: sqlite3.Connection, refund_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM pending_refunds WHERE id = ?", (refund_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def set_refund_status(conn: sqlite3.Connection, refund_id: int,
+                      status: str) -> None:
+    conn.execute("UPDATE pending_refunds SET status = ? WHERE id = ?",
+                 (status, refund_id))
+
+
+def list_unknown_refunds(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM pending_refunds WHERE status = 'unknown'"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def ledger_deposits(conn: sqlite3.Connection) -> dict[str, float]:
+    rows = conn.execute(
+        "SELECT signature, amount_sol FROM ledger WHERE kind = 'deposit' "
+        "AND signature IS NOT NULL"
+    ).fetchall()
+    return {r["signature"]: r["amount_sol"] for r in rows}
+
+
+def duplicate_deposit_sigs(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        "SELECT signature, COUNT(*) AS n FROM ledger "
+        "WHERE kind = 'deposit' AND signature IS NOT NULL "
+        "GROUP BY signature HAVING n > 1"
+    ).fetchall()
+    return [r["signature"] for r in rows]
+
+
+def acquire_launch_lock(conn: sqlite3.Connection) -> bool:
+    """Persistent launch lock: atomic check-and-set in one IMMEDIATE
+    transaction. Two /launch can never both acquire it."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'launch_lock'").fetchone()
+        if row is not None:
+            conn.execute("ROLLBACK")
+            return False
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('launch_lock', "
+            "datetime('now'))")
+        conn.execute("COMMIT")
+        return True
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
+def release_launch_lock(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM meta WHERE key = 'launch_lock'")
+
+
+def launch_lock_held(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = 'launch_lock'").fetchone()
+    return row is not None

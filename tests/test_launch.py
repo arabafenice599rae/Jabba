@@ -1,6 +1,6 @@
 import pytest
 
-from curvebot.launch import CHUNK_SIZE, MAX_PARTICIPANTS, compute_distribution, plan_chunks
+from curvebot.launch import CHUNK_SIZE, compute_distribution, plan_chunks
 
 
 def weights_for(n):

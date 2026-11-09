@@ -3,15 +3,15 @@ Real Chain object, real tx building and signing; only the network is fake."""
 from __future__ import annotations
 
 import asyncio
-import base64
 from types import SimpleNamespace
 
 import pytest
 from solders.hash import Hash
 from solders.keypair import Keypair
 
-from conftest import finding
-from curvebot import db, launch as L, pump_curve as pc, service
+from curvebot import db, service
+from curvebot import launch as L
+from curvebot import pump_curve as pc
 from curvebot.chain import JITO_TIP_ACCOUNTS, Chain
 from curvebot.monitor import DepositMonitor
 
@@ -30,8 +30,8 @@ class RPC:
         self.lamports, self.global_raw = lamports, global_raw
 
     async def get_account_info(self, pk):
-        return SimpleNamespace(value=SimpleNamespace(
-            data=[base64.b64encode(self.global_raw).decode(), "base64"]))
+        # solana-py shape: Account.data is already-decoded bytes
+        return SimpleNamespace(value=SimpleNamespace(data=self.global_raw))
 
     async def get_minimum_balance_for_rent_exemption(self, n):
         return SimpleNamespace(value=L.TOKEN_ACCOUNT_RENT_LAMPORTS)
@@ -41,6 +41,21 @@ class RPC:
 
     async def get_latest_blockhash(self):
         return SimpleNamespace(value=SimpleNamespace(blockhash=Hash.default()))
+
+
+def _unsigned_create_tx(payer: str, mint: str) -> bytes:
+    """Unsigned v0 tx shaped like PumpPortal's: references Token-2022."""
+    from solders.instruction import AccountMeta, Instruction
+    from solders.message import MessageV0
+    from solders.null_signer import NullSigner
+    from solders.pubkey import Pubkey
+    from solders.transaction import VersionedTransaction
+    payer_pk, mint_pk = Pubkey.from_string(payer), Pubkey.from_string(mint)
+    t22 = Pubkey.from_string("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
+    ix = Instruction(t22, b"\x00", [AccountMeta(mint_pk, True, True),
+                                    AccountMeta(payer_pk, True, True)])
+    msg = MessageV0.try_compile(payer_pk, [ix], [], Hash.default())
+    return bytes(VersionedTransaction(msg, [NullSigner(payer_pk), NullSigner(mint_pk)]))
 
 
 @pytest.fixture
@@ -58,8 +73,8 @@ def world(monkeypatch, conn):
         def __init__(self, http):
             pass
 
-        async def create_with_devbuy(self, *a, **k):
-            return "fake-b58"
+        async def create_with_devbuy(self, payer, mint, *a, **k):
+            return _unsigned_create_tx(payer, mint)
 
     async def send_bundle(http, txs):
         state["bundle"] = txs
@@ -74,7 +89,7 @@ def world(monkeypatch, conn):
     monkeypatch.setattr(L, "upload_pinata_metadata", fake_pinata)
     monkeypatch.setattr(L, "PumpPortal", FakePortal)
     monkeypatch.setattr(L, "wait_bundle", wait_bundle)
-    c.sign_b58 = lambda b58, extra_signers=None: b"create-tx"
+    c.sign_versioned = lambda raw, extra_signers=None: b"create-tx"
     c.send_bundle = send_bundle
     c.fetch_tip_accounts = tips
 
@@ -132,8 +147,6 @@ def test_launch_failed_bundle_keeps_presale_open(world, cfg, conn):
     assert db.get_meta(conn, "state") is None
 
 
-@finding("bundle outcome UNKNOWN (timeout) leaves state unset: refunds stay "
-         "open although the tokens may already be distributed")
 def test_launch_unknown_outcome_blocks_refunds(world, cfg, conn):
     world.seed(3, 1.0)
     world.state["status"] = "pending"
@@ -142,9 +155,6 @@ def test_launch_unknown_outcome_blocks_refunds(world, cfg, conn):
     assert db.get_meta(conn, "state") not in (None, "")
 
 
-@finding("preflight ignores pump.fun create costs (mint, bonding curve, "
-         "metadata, creator ATA rent): with TEAM_KEEP_PERCENT=0 it passes "
-         "although the create tx cannot be paid")
 def test_preflight_includes_create_rent(world, cfg, conn):
     cfg.team_keep_percent = 0.0
     world.seed(5, 1.0, extra_lamports=40_000_000)    # covers our estimate only
@@ -152,8 +162,6 @@ def test_preflight_includes_create_rent(world, cfg, conn):
         _run(world, cfg, conn)
 
 
-@finding("raise > ~95.6 SOL: distribution is sized on tokens the curve "
-         "cannot sell (> real reserves) -> last transfer fails, launch impossible")
 def test_launch_rejects_raise_beyond_curve_capacity(world, cfg, conn):
     world.seed(20, 6.0)                               # 120 SOL
     with pytest.raises(RuntimeError):
@@ -172,24 +180,20 @@ def test_safety_margin_vs_slippage(world, cfg, conn):
     assert margin < cfg.launch_slippage / 100     # margin << allowed slippage
 
 
-@finding("monitor keeps crediting deposits after launch: SOL arrive, no "
-         "tokens, refunds closed -> funds stuck")
 def test_monitor_stops_after_launch(db_path, cfg):
     with db.connect(db_path) as c:
         db.set_wallet(c, 1, "WALLET_A")
         db.set_meta(c, "state", "launched")
 
     class Fake:
-        async def incoming_sol_transfers(self, max_signatures=25):
+        async def scan_incoming(self, max_pages=10, is_seen=None):
             return [{"signature": "late", "slot": 9, "sender": "WALLET_A",
-                     "amount_sol": 3.0}]
+                     "amount_sol": 3.0}], ["late"]
     asyncio.run(DepositMonitor(Fake(), cfg, lambda: db.connect(db_path))._poll_sol_deposits())
     with db.connect(db_path) as c:
         assert db.user_contribution(c, 1) == 0
 
 
-@finding("incoming_sol_transfers reads only the last 25 signatures with no "
-         "pagination: a burst of >25 txs between polls loses deposits")
 def test_incoming_scan_paginates(cfg):
     sigs = [SimpleNamespace(signature=f"s{i}", slot=100 - i, err=None) for i in range(40)]
 
@@ -202,6 +206,6 @@ def test_incoming_scan_paginates(cfg):
     c = Chain.__new__(Chain)
     c.keypair = Keypair()
     c.client = Client()
-    c._find_incoming_transfer = lambda v: {"sender": "A", "amount_sol": 1.0}
+    c._find_incoming_transfers = lambda v: [{"sender": "A", "amount_sol": 1.0}]
     out = asyncio.run(c.incoming_sol_transfers())
     assert len(out) == 40

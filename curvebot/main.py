@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from . import db
+from . import db, service
 from .chain import Chain
 from .config import Config
 from .handlers import router
@@ -37,6 +37,10 @@ async def run() -> None:
 
     conn = db.open_conn(cfg.db_path)
     dp["conn"] = conn
+    moved = service.recover_after_restart(conn)
+    if moved:
+        log.warning("%d rimborsi interrotti al riavvio: stato unknown, "
+                    "usare /reconcile", moved)
 
     monitor = DepositMonitor(chain, cfg, lambda: db.connect(cfg.db_path))
 

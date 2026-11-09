@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from conftest import ADMIN, USERS, FakeChain, Recorder, make_call, make_message
 
-from conftest import ADMIN, USERS, FakeChain, Recorder, finding, make_call, make_message
-from curvebot import db, handlers as h, service
+from curvebot import db, service
+from curvebot import handlers as h
 from curvebot.keyboards import main_menu
 
 U = USERS[0]
@@ -102,8 +103,6 @@ def test_concurrent_refunds_pay_once(cfg, conn, rec):
     assert paid <= 10.0 * 0.997 + 1e-9, f"paid {paid} SOL for a 10 SOL contribution"
 
 
-@finding("refund allowed while run_launch is in flight (no 'launching' state): "
-         "a contributor snapshotted for tokens can also take the SOL back")
 def test_no_refund_while_launch_in_progress(cfg, conn, chain, rec, monkeypatch):
     _seed(conn)
 
@@ -125,7 +124,6 @@ def test_no_refund_while_launch_in_progress(cfg, conn, chain, rec, monkeypatch):
     assert chain.sent == []
 
 
-@finding("launch:go has no in-flight lock: two taps start two launches")
 def test_double_tap_launch_runs_once(cfg, conn, chain, rec, monkeypatch):
     _seed(conn)
     calls = []
@@ -152,24 +150,18 @@ def _setwallet(uid, arg, cfg, conn, rec):
     asyncio.run(h.cmd_setwallet(make_message(uid, rec), cmd, cfg, conn))
 
 
-@finding("/setwallet accepts any string >= 32 chars; one bad wallet makes "
-         "the distribution tx unbuildable and blocks the launch for everyone")
 @pytest.mark.parametrize("bad", ["x" * 44, "0" * 40, "hello world this is not a key!!!!"])
 def test_setwallet_validates_pubkey(cfg, conn, rec, bad):
     _setwallet(U, bad, cfg, conn, rec)
     assert db.get_wallet(conn, U) is None
 
 
-@finding("two users can register the same wallet; deposits from it are "
-         "credited to whichever row the monitor maps last")
 def test_setwallet_rejects_wallet_already_taken(cfg, conn, rec):
     _setwallet(USERS[0], WALLET, cfg, conn, rec)
     _setwallet(USERS[1], WALLET, cfg, conn, rec)
     assert db.get_wallet(conn, USERS[1]) is None
 
 
-@finding("wallet can be changed after depositing: later deposits from the "
-         "original wallet are no longer recognised and are silently kept")
 def test_setwallet_locked_after_first_deposit(cfg, conn, rec):
     _seed(conn)
     _setwallet(U, "7UX2i7SucgLMQcfZ75s3VXmZZY4YRUyJN9X1RgfMoDUi", cfg, conn, rec)
@@ -178,17 +170,13 @@ def test_setwallet_locked_after_first_deposit(cfg, conn, rec):
 
 # ---------------- UI consistency ----------------
 
-@finding("main menu shows '📤 Vendi' -> callback 'sell:open' with no handler "
-         "(dead button; there is no Rimborso button)")
 def test_every_menu_button_has_a_handler():
     datas = {b.callback_data for row in main_menu().inline_keyboard for b in row}
     handled = {"menu:howbuy", "menu:position", "menu:chart", "menu:info",
-               "menu:back"}
+               "menu:back", "refund:open"}
     assert datas <= handled
 
 
-@finding("_est_tokens prices each user as if they bought alone at the curve "
-         "bottom: the sum of /position estimates exceeds what the dev buy gets")
 def test_position_estimates_sum_to_total(cfg, conn):
     from curvebot.pump_curve import tokens_out_for_sol
     for uid, s in zip(USERS, (5.0, 10.0, 15.0)):
@@ -210,3 +198,16 @@ def test_chart_callback_renders(cfg, conn, rec):
     _seed(conn)
     asyncio.run(h.cb_chart(make_call(U, "menu:chart", rec), cfg, conn))
     assert rec.photos == 1
+
+
+def test_chart_handler_sends_input_file(cfg, conn):
+    """aiogram rejects raw bytes: the handler must wrap the PNG."""
+    from aiogram.types import BufferedInputFile
+    sent = []
+
+    async def answer_photo(photo, caption=None, reply_markup=None, **kw):
+        sent.append(photo)
+    call = make_call(U, "menu:chart", Recorder())
+    call.message.answer_photo = answer_photo
+    asyncio.run(h.cb_chart(call, cfg, conn))
+    assert isinstance(sent[0], BufferedInputFile)
