@@ -3,9 +3,14 @@ import asyncio
 
 import pytest
 
-from curvebot.launch import (NETWORK_FEE_LAMPORTS, TOKEN_ACCOUNT_RENT_LAMPORTS,
-                             estimate_launch_costs, parse_confirmation,
-                             parse_inflight_status)
+from curvebot.launch import (
+    NETWORK_FEE_LAMPORTS,
+    TOKEN_ACCOUNT_RENT_LAMPORTS,
+    estimate_launch_costs,
+    parse_confirmation,
+    parse_inflight_status,
+)
+from curvebot.pump_curve import dev_buy_total_cost_lamports
 
 
 class TestBundleStatusParsing:
@@ -72,7 +77,7 @@ class TestCostPreflight:
         cfg = self._cfg()
         chain = self._chain()
         costs = asyncio.run(estimate_launch_costs(chain, cfg, 36, 1.0))
-        assert costs["dev_buy"] == 1_000_000_000
+        assert costs["dev_buy"] == dev_buy_total_cost_lamports(1.0)  # fees on top + create rents
         assert costs["ata_rent"] == 36 * TOKEN_ACCOUNT_RENT_LAMPORTS
         assert costs["network_fees"] == NETWORK_FEE_LAMPORTS * 5
         assert costs["priority_fee"] == 500_000
@@ -80,11 +85,11 @@ class TestCostPreflight:
         assert costs["total"] == sum(v for k, v in costs.items() if k != "total")
 
     def test_costs_rent_36_users_meaningful(self):
-        """36 ATA rent is NOT negligible: must be ~0.073 SOL."""
+        """36 ATA rent is NOT negligible: must be ~0.075 SOL."""
         cfg = self._cfg()
         chain = self._chain()
         costs = asyncio.run(estimate_launch_costs(chain, cfg, 36, 0.0))
-        assert costs["ata_rent"] / 1e9 == pytest.approx(0.0734, abs=0.001)
+        assert costs["ata_rent"] / 1e9 == pytest.approx(0.0747, abs=0.001)  # 170 B Token-2022 ATA
 
     def test_costs_rpc_rent_override(self):
         cfg = self._cfg()

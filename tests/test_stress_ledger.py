@@ -8,9 +8,8 @@ from fractions import Fraction
 import pytest
 from hypothesis import settings
 from hypothesis import strategies as st
-from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
+from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
 
-from conftest import finding
 from curvebot import db, service
 
 UIDS = st.sampled_from([1, 2, 3, 4, 5])
@@ -94,7 +93,7 @@ def test_float_residue_after_partial_refunds(conn):
     # FIXED: a residue refund is quoted only if it is >= 1 lamport
     if left > 0:
         q = service.reserve_refund(conn, 1, 1.0, 30)
-        assert int(round(q["net_sol"] * 1e9)) >= 1
+        assert round(q["net_sol"] * 1e9) >= 1    # sub-lamport refunds are rejected
 
 
 def test_refund_quote_rejects_sub_lamport(conn):

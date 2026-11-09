@@ -20,7 +20,6 @@ from solders.pubkey import Pubkey
 from solders.system_program import TransferParams, transfer
 from solders.transaction import Transaction
 
-from conftest import finding
 from curvebot import db
 from curvebot.chain import Chain
 from curvebot.monitor import DepositMonitor
@@ -131,8 +130,9 @@ class FakeChainRPC:
     def __init__(self, transfers):
         self._transfers = transfers
 
-    async def incoming_sol_transfers(self, max_signatures=25):
-        return list(self._transfers)
+    async def scan_incoming(self, max_pages=10, is_seen=None):
+        fresh = [t for t in self._transfers if not (is_seen and is_seen(t["signature"]))]
+        return fresh, sorted({t["signature"] for t in fresh})
 
 
 def _run_monitor(db_path, cfg, transfers, wallets, pre_last=None):
@@ -166,7 +166,7 @@ def test_monitor_ignores_unknown_and_below_min(db_path, cfg):
 
 def test_monitor_idempotent_across_polls(db_path, cfg):
     t = [{"signature": "s1", "slot": 1, "sender": "WALLET_A", "amount_sol": 2.0}]
-    m1 = _run_monitor(db_path, cfg, t, {1: "WALLET_A"})
+    _run_monitor(db_path, cfg, t, {1: "WALLET_A"})
     # second poll, same history, fresh monitor (restart): sig already seen
     m2 = DepositMonitor(FakeChainRPC(t), cfg, lambda: db.connect(db_path))
     asyncio.run(m2._poll_sol_deposits())

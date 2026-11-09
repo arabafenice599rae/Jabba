@@ -22,6 +22,30 @@ def available_contribution(conn, telegram_id: int) -> float:
         db.pending_refund_total(conn, telegram_id)
 
 
+def _quote(available: float, fraction: float, refund_fee_bps: int) -> dict:
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError("frazione fuori range [0,1]")
+    if not 0 <= refund_fee_bps <= 10_000:
+        raise ValueError("fee non valida (fuori range 0-100%)")
+    refund_sol = available * fraction
+    if refund_sol <= 0:
+        raise ValueError("nessun contributo da rimborsare")
+    fee = refund_sol * refund_fee_bps / 10_000.0
+    net = refund_sol - fee
+    if round(net * 1_000_000_000) <= 0:
+        raise ValueError("importo troppo piccolo (sub-lamport)")
+    return {"refund_sol": refund_sol, "fee_sol": fee, "net_sol": net,
+            "contribution_after": available - refund_sol}
+
+
+def refund_quote(conn, telegram_id: int, fraction: float,
+                 refund_fee_bps: int) -> dict:
+    """Preview of a refund on the AVAILABLE contribution. Writes nothing:
+    the reservation happens only on confirmation (reserve_refund)."""
+    return _quote(available_contribution(conn, telegram_id), fraction,
+                  refund_fee_bps)
+
+
 def reserve_refund(conn, telegram_id: int, fraction: float,
                    refund_fee_bps: int) -> dict:
     """Atomically reserve a refund. Check-and-insert run in ONE explicit
@@ -29,36 +53,27 @@ def reserve_refund(conn, telegram_id: int, fraction: float,
     the pending row makes the reservation durable across restarts.
     Returns dict with pending_id, refund_sol, fee_sol, net_sol,
     contribution_after. Raises ValueError if not enough available."""
-    if not 0.0 <= fraction <= 1.0:
-        raise ValueError("frazione fuori range [0,1]")
-    if not 0 <= refund_fee_bps <= 10_000:
-        raise ValueError("fee non valida (fuori range 0-100%)")
     conn.execute("BEGIN IMMEDIATE")
     try:
-        available = available_contribution(conn, telegram_id)
-        refund_sol = available * fraction
-        if refund_sol <= 0:
-            raise ValueError("nessun contributo da rimborsare")
-        fee = refund_sol * refund_fee_bps / 10_000.0
-        net = refund_sol - fee
-        if int(round(net * 1_000_000_000)) <= 0:
-            raise ValueError("importo troppo piccolo (sub-lamport)")
-        pending_id = db.insert_pending_refund(conn, telegram_id,
-                                              refund_sol, fee)
+        quote = _quote(available_contribution(conn, telegram_id), fraction,
+                       refund_fee_bps)
+        quote["pending_id"] = db.insert_pending_refund(
+            conn, telegram_id, quote["refund_sol"], quote["fee_sol"])
         conn.execute("COMMIT")
-    except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except Exception:
-            pass
+    except BaseException:
+        conn.execute("ROLLBACK")
         raise
-    return {
-        "pending_id": pending_id,
-        "refund_sol": refund_sol,
-        "fee_sol": fee,
-        "net_sol": net,
-        "contribution_after": available - refund_sol,
-    }
+    return quote
+
+
+def recover_after_restart(conn) -> int:
+    """A reservation still 'pending' at startup means the process died
+    between reserving and recording the outcome: the SOL may have been
+    sent. Never release it blindly: move it to 'unknown' for /reconcile.
+    Returns how many were moved."""
+    cur = conn.execute(
+        "UPDATE pending_refunds SET status = 'unknown' WHERE status = 'pending'")
+    return cur.rowcount
 
 
 def commit_refund(conn, pending_id: int, signature: str | None = None) -> dict:
@@ -111,10 +126,13 @@ async def resolve_unknown_refunds(conn, chain, grace_seconds: int = 600
         else:
             from datetime import datetime, timezone
             try:
+                # SQLite CURRENT_TIMESTAMP is naive UTC ("YYYY-MM-DD HH:MM:SS")
                 created = datetime.fromisoformat(pending["created_at"])
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
                 age = (datetime.now(timezone.utc) - created).total_seconds()
-            except Exception:
-                age = grace_seconds + 1
+            except (TypeError, ValueError):
+                age = 0.0       # unreadable timestamp: keep holding, never release
             if age > grace_seconds:
                 db.release_pending_refund(conn, pending["id"])
                 resolutions.append({"id": pending["id"],

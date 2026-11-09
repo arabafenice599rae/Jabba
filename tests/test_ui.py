@@ -1,7 +1,7 @@
-import pytest
 
 from curvebot.chart import render_pump_curve_png
 from curvebot.keyboards import back_to_menu, main_menu
+
 
 def test_chart_png_valid():
     png = render_pump_curve_png(dev_buy_sol=5.0)

@@ -1,7 +1,6 @@
 import sqlite3
 from contextlib import contextmanager
 
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     telegram_id INTEGER PRIMARY KEY,
@@ -156,6 +155,7 @@ def insert_pending_refund(conn: sqlite3.Connection, telegram_id: int,
         "VALUES (?, ?, ?)",
         (telegram_id, amount_sol, fee_sol),
     )
+    assert cur.lastrowid is not None
     return cur.lastrowid
 
 
@@ -224,11 +224,9 @@ def acquire_launch_lock(conn: sqlite3.Connection) -> bool:
             "datetime('now'))")
         conn.execute("COMMIT")
         return True
-    except Exception:
-        try:
+    except BaseException:
+        if conn.in_transaction:
             conn.execute("ROLLBACK")
-        except Exception:
-            pass
         raise
 
 

@@ -4,10 +4,13 @@ reverts — the treasury never holds tokens in any confirmed state.
 
 Verified facts (2026-11):
 - PumpPortal creation goes through POST /api/trade-local with
-  action="create"; the dev buy is INCLUDED in the create tx; metadata
-  must be uploaded to IPFS (Pinata) beforehand.
+  action="create" and a JSON body; the response is the raw unsigned tx
+  (octet-stream). The dev buy is INCLUDED in the create tx; metadata must
+  be uploaded to IPFS (Pinata) beforehand.
 - pump.fun global account: VTR 1.073B, VSR 30 SOL, fee 95 bps protocol
   (+30 bps creator), 6 decimals, supply 1B. Verified at launch time.
+- The mint is Token-2022; `amount` is curve SOL, fees on top (see
+  pump_curve). All of this is re-checked by tests/test_fork_mainnet.py.
 
 Distribution math works in integer BASE UNITS (10**6) so the invariant
     sum(user_tokens) + team + dust <= tokens_bought
@@ -22,12 +25,25 @@ launch is REJECTED, not silently chained.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
+from fractions import Fraction
+from pathlib import Path
 
 import aiohttp
 
 from . import db, service
-from .pump_curve import DECIMALS, params_match, tokens_out_for_sol, verify_params
+from .chain import token_program_of_create_tx
+from .pump_curve import (
+    DECIMALS,
+    MAX_DEV_BUY_LAMPORTS,
+    dev_buy_total_cost_lamports,
+    params_match,
+    sol_to_lamports,
+    tokens_out_for_sol,
+    verify_params,
+)
 
 log = logging.getLogger("launch")
 
@@ -51,46 +67,47 @@ def compute_distribution(weights: dict[int, float], tokens_base: int,
     Invariant: sum(shares) + team + dust == distributable <= tokens_base.
     Floor rounding; the dust stays in the treasury.
     """
+    if team_bps < 0 or safety_bps < 0 or team_bps + safety_bps > 10_000:
+        raise ValueError("team_bps + safety_bps deve stare in [0, 10000]")
     if not weights or tokens_base <= 0:
         return [], 0, 0
-    if team_bps < 0 or safety_bps < 0 or team_bps + safety_bps > 10_000:
-        raise ValueError("team_bps + safety_bps fuori range (0-10000)")
-    total_w = sum(weights.values())
+    exact = {uid: Fraction(w) for uid, w in weights.items()}   # floats are exact here
+    if any(w < 0 for w in exact.values()):
+        raise ValueError("peso negativo nella distribuzione")
+    total_w = sum(exact.values())
     if total_w <= 0:
         return [], 0, 0
     team = tokens_base * team_bps // 10_000
     distributable = tokens_base * (10_000 - team_bps - safety_bps) // 10_000
     out = []
     assigned = 0
-    for uid in sorted(weights):
-        # float weights (SQLite REAL) MUST yield INTEGER base units
-        share = int(distributable * weights[uid] // total_w)
+    for uid in sorted(exact):
+        share = int(distributable * exact[uid] // total_w)
         out.append((uid, share))
         assigned += share
     dust = distributable - assigned
     return out, team, dust
 
 
-TOKEN_ACCOUNT_RENT_LAMPORTS = 2_039_280   # rent-exempt minimum, 165 B
+TOKEN_ACCOUNT_SIZE = 170                  # Token-2022 ATA (ImmutableOwner ext)
+TOKEN_ACCOUNT_RENT_LAMPORTS = 2_074_080   # rent-exempt minimum, 170 B (measured)
 NETWORK_FEE_LAMPORTS = 5_000              # per tx
 BUNDLE_TX_COUNT = 5
-# pump.fun create-side costs (conservative upper bound): mint account,
-# Metaplex metadata, bonding curve PDA + its ATA, creator ATA, buffer.
-CREATE_COSTS_LAMPORTS = 30_000_000
 
 
 async def estimate_launch_costs(chain, cfg, n_recipients: int,
                                 dev_buy_sol: float) -> dict:
-    """Full cost of the launch: dev buy + ATA rent for every recipient
-    (worst case: none exists yet) + network fees + priority fee + tip."""
+    """Full cost of the launch: dev buy with fees on top and create rents
+    + ATA rent for every recipient (worst case: none exists yet) + network
+    fees + priority fee + tip."""
     try:
-        resp = await chain.client.get_minimum_balance_for_rent_exemption(165)
+        resp = await chain.client.get_minimum_balance_for_rent_exemption(
+            TOKEN_ACCOUNT_SIZE)
         rent = resp.value
-    except Exception:
+    except Exception:  # noqa: BLE001 - RPC hiccup: measured constant is safe
         rent = TOKEN_ACCOUNT_RENT_LAMPORTS
     breakdown = {
-        "dev_buy": int(dev_buy_sol * 1_000_000_000),
-        "create_costs": CREATE_COSTS_LAMPORTS,
+        "dev_buy": dev_buy_total_cost_lamports(dev_buy_sol),
         "ata_rent": rent * n_recipients,
         "network_fees": NETWORK_FEE_LAMPORTS * BUNDLE_TX_COUNT,
         "priority_fee": int(cfg.launch_priority_fee * 1_000_000_000),
@@ -116,15 +133,15 @@ async def upload_pinata_metadata(http: aiohttp.ClientSession, cfg) -> str:
     """Upload image + metadata JSON to Pinata; returns the metadata URI."""
     headers = {"Authorization": f"Bearer {cfg.pinata_jwt}"}
 
-    with open(cfg.token_image_path, "rb") as f:
-        form = aiohttp.FormData()
-        form.add_field("network", "public")
-        form.add_field("file", f, filename="image.png",
-                       content_type="image/png")
-        async with http.post("https://uploads.pinata.cloud/v3/files",
-                            headers=headers, data=form) as r:
-            r.raise_for_status()
-            img_cid = (await r.json())["data"]["cid"]
+    image = await asyncio.to_thread(Path(cfg.token_image_path).read_bytes)
+    form = aiohttp.FormData()
+    form.add_field("network", "public")
+    form.add_field("file", image, filename="image.png",
+                   content_type="image/png")
+    async with http.post("https://uploads.pinata.cloud/v3/files",
+                         headers=headers, data=form) as r:
+        r.raise_for_status()
+        img_cid = (await r.json())["data"]["cid"]
 
     meta = {
         "name": cfg.token_name, "symbol": cfg.token_symbol,
@@ -146,12 +163,14 @@ async def upload_pinata_metadata(http: aiohttp.ClientSession, cfg) -> str:
 
 
 async def fetch_global_account(chain) -> bytes:
-    resp = await chain.client.get_account_info(
-        __import__("solders").pubkey.Pubkey.from_string(GLOBAL_ACCOUNT))
+    """Raw data of the pump.fun global account. solana-py already decodes
+    the base64 payload: `value.data` is bytes."""
+    from solders.pubkey import Pubkey
+
+    resp = await chain.client.get_account_info(Pubkey.from_string(GLOBAL_ACCOUNT))
     if resp.value is None:
         raise RuntimeError("pump.fun global account non trovato")
-    import base64
-    return base64.b64decode(resp.value.data[0])
+    return bytes(resp.value.data)
 
 
 class PumpPortal:
@@ -161,8 +180,9 @@ class PumpPortal:
     async def create_with_devbuy(self, payer: str, mint: str, uri: str,
                                  name: str, symbol: str,
                                  dev_buy_sol: float, slippage: float,
-                                 priority_fee: float) -> str:
-        """Create tx INCLUDING the dev buy. Returns base58 unsigned tx."""
+                                 priority_fee: float) -> bytes:
+        """Create tx INCLUDING the dev buy. Returns the UNSIGNED tx as raw
+        bytes (application/octet-stream). The API only accepts JSON bodies."""
         payload = {
             "publicKey": payer,
             "action": "create",
@@ -175,9 +195,9 @@ class PumpPortal:
             "pool": "pump",
         }
         async with self.http.post(f"{PUMPPORTAL_BASE}/trade-local",
-                                  data=payload) as r:
+                                  json=payload) as r:
             r.raise_for_status()
-            return await r.text()
+            return await r.read()
 
 
 def parse_inflight_status(data: dict) -> str:
@@ -220,7 +240,6 @@ async def wait_bundle(http: aiohttp.ClientSession, bundle_id: str,
 
     Returns: 'finalized' | 'confirmed' | 'failed' | 'pending' (timeout:
     UNKNOWN outcome -> manual reconciliation, NEVER auto-retry)."""
-    import asyncio
     import time
 
     async def rpc(method, params):
@@ -255,22 +274,57 @@ async def wait_bundle(http: aiohttp.ClientSession, bundle_id: str,
 
 
 async def run_launch(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
-    """Atomic launch. A persistent launch lock (meta table, atomic
-    check-and-set) prevents two launches: released on DEFINITIVE failure,
-    kept on UNKNOWN bundle outcomes (manual resolution required)."""
+    """Atomic launch behind a PERSISTENT lock (meta table, atomic
+    check-and-set): two launches can never run, even across restarts.
+    Released on a DEFINITIVE failure (nothing executed); kept when the
+    bundle outcome is UNKNOWN, so refunds stay suspended until the admin
+    has checked on chain. State becomes 'launched' only after landing."""
     if not db.acquire_launch_lock(conn):
-        raise RuntimeError("lancio già in corso (lock attivo)")
+        raise RuntimeError("lancio già in corso o esito precedente da "
+                           "verificare (lock attivo)")
     try:
-        report = await _run_launch_locked(chain, cfg, conn, http)
-    except Exception as e:
-        if "SCONOSCIUTO" not in str(e):
-            db.release_launch_lock(conn)
+        return await _run_launch_locked(chain, cfg, conn, http)
+    except LaunchOutcomeUnknown:
+        raise                           # lock stays: manual verification
+    except BaseException:
+        db.release_launch_lock(conn)
         raise
-    return report
+
+
+class LaunchOutcomeUnknown(RuntimeError):
+    """The bundle may or may not have landed: never retry blindly."""
+
+
+BLOCKHASH_EXPIRY_S = 300   # a bundle's blockhash is long dead after 5 minutes
+
+
+async def resolve_unknown_launch(chain, conn, now: float | None = None) -> str:
+    """Settle a 'launch_unknown' state FROM THE CHAIN, never by guess.
+    The bundle is atomic: the mint exists (finalized) iff it landed.
+    -> "landed": state 'launched' (lock kept, refunds stay closed)
+    -> "failed": mint absent after the blockhash expired; lock released
+    -> "unknown": too early to tell, nothing changes"""
+    from solana.rpc.core import Finalized
+    from solders.pubkey import Pubkey
+
+    if db.get_meta(conn, "state") != "launch_unknown":
+        raise RuntimeError("nessun lancio con esito sconosciuto")
+    mint = db.get_meta(conn, "pending_mint") or ""
+    resp = await chain.client.get_account_info(Pubkey.from_string(mint),
+                                               commitment=Finalized)
+    if resp.value is not None:
+        db.set_meta(conn, "state", "launched")
+        return "landed"
+    age = (now or time.time()) - int(db.get_meta(conn, "pending_at") or 0)
+    if age < BLOCKHASH_EXPIRY_S:
+        return "unknown"
+    db.set_meta(conn, "state", "")
+    db.release_launch_lock(conn)
+    return "failed"
 
 
 async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> dict:
-    """Inner launch body; the caller holds the launch lock."""
+    """Launch body; the caller holds the launch lock."""
     global_raw = await fetch_global_account(chain)
     onchain = verify_params(global_raw)
     if not params_match(onchain):
@@ -282,14 +336,11 @@ async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> d
     if raised <= 0:
         raise RuntimeError("nessun contributo raccolto")
     dev_buy_sol = raised * (100.0 - cfg.team_keep_percent) / 100.0
-    from .pump_curve import RTR0, VSR0, VTR0
-    net_needed = VSR0 * RTR0 / (VTR0 - RTR0)
-    max_dev_buy = net_needed / (1 - 0.0125) / 1_000_000_000
-    if dev_buy_sol > max_dev_buy:
+    if sol_to_lamports(dev_buy_sol) >= MAX_DEV_BUY_LAMPORTS:
         raise RuntimeError(
-            f"dev buy {dev_buy_sol:.2f} SOL supera la capacita' della curva "
-            f"(max ~{max_dev_buy:.1f} SOL): il presale e' troppo grande per "
-            f"un lancio singolo, ridurre i contributi")
+            f"dev buy {dev_buy_sol:.4f} SOL >= capacita della curva "
+            f"({MAX_DEV_BUY_LAMPORTS / 1e9:.3f} SOL): la distribuzione "
+            f"supererebbe le riserve reali")
     contributions = {u: c for u, c in service.shares(conn).items() if c > 0}
     costs = await estimate_launch_costs(chain, cfg, len(contributions),
                                         dev_buy_sol)
@@ -309,10 +360,11 @@ async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> d
 
     uri = await upload_pinata_metadata(http, cfg)
     portal = PumpPortal(http)
-    create_b58 = await portal.create_with_devbuy(
+    create_raw = await portal.create_with_devbuy(
         chain.pubkey, mint, uri, cfg.token_name, cfg.token_symbol,
         dev_buy_sol, cfg.launch_slippage, cfg.launch_priority_fee)
-    tx_create = chain.sign_b58(create_b58, extra_signers=[mint_kp])
+    tx_create = chain.sign_versioned(create_raw, extra_signers=[mint_kp])
+    token_program = token_program_of_create_tx(create_raw)
 
     expected = tokens_out_for_sol(dev_buy_sol)
     dist, team, dust = compute_distribution(
@@ -330,13 +382,14 @@ async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> d
         is_last = i == len(chunks) - 1
         tip = cfg.jito_tip_lamports if is_last else 0
         signed = chain.build_distribution_tx(
-            mint, chunk, tip_lamports=tip, tip_account=tip_accounts[0])
+            mint, chunk, tip_lamports=tip, tip_account=tip_accounts[0],
+            token_program=token_program)
         if len(signed) > TX_SIZE_LIMIT:
             raise RuntimeError(
                 f"tx distribuzione {i}: {len(signed)} byte > {TX_SIZE_LIMIT}")
         dist_txs.append(signed)
 
-    bundle = [tx_create] + dist_txs
+    bundle = [tx_create, *dist_txs]
     bundle_id = await chain.send_bundle(http, bundle)
     status = await wait_bundle(http, bundle_id)
     if status == "failed":
@@ -344,7 +397,10 @@ async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> d
                            f"nulla e' stato eseguito, riprovare")
     if status == "pending":
         db.set_meta(conn, "state", "launch_unknown")
-        raise RuntimeError(
+        db.set_meta(conn, "pending_mint", mint)
+        db.set_meta(conn, "pending_bundle", bundle_id)
+        db.set_meta(conn, "pending_at", str(int(time.time())))
+        raise LaunchOutcomeUnknown(
             f"esito bundle SCONOSCIUTO ({bundle_id}): verificare "
             f"manualmente su Solscan PRIMA di riprovare (mai retry "
             f"automatico: rischio doppio lancio)")

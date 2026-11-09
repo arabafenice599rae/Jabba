@@ -11,10 +11,9 @@ from solders.hash import Hash
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
-from spl.token.constants import TOKEN_PROGRAM_ID
+from spl.token.constants import TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID
 from spl.token.instructions import get_associated_token_address
 
-from conftest import finding
 from curvebot.chain import JITO_TIP_ACCOUNTS, Chain
 from curvebot.launch import CHUNK_SIZE, MAX_PARTICIPANTS, TX_SIZE_LIMIT, plan_chunks
 
@@ -39,8 +38,9 @@ def _decode(raw: bytes):
 
 
 @settings(max_examples=60, deadline=None)
-@given(st.integers(1, MAX_PARTICIPANTS), st.booleans())
-def test_every_chunk_fits_and_carries_exact_amounts(n, dup):
+@given(st.integers(1, MAX_PARTICIPANTS), st.booleans(),
+       st.sampled_from([TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID]))
+def test_every_chunk_fits_and_carries_exact_amounts(n, dup, program):
     c = _chain()
     mint = Keypair().pubkey()
     wallets = [str(Keypair().pubkey()) for _ in range(n)]
@@ -53,11 +53,11 @@ def test_every_chunk_fits_and_carries_exact_amounts(n, dup):
     for i, chunk in enumerate(chunks):
         last = i == len(chunks) - 1
         raw = c.build_distribution_tx(str(mint), chunk, 1_000_000 if last else 0,
-                                      JITO_TIP_ACCOUNTS[0])
+                                      JITO_TIP_ACCOUNTS[0], token_program=str(program))
         assert len(raw) <= TX_SIZE_LIMIT, (n, i, len(raw))
         tx, ixs = _decode(raw)
         assert tx.verify_with_results() if hasattr(tx, "verify_with_results") else True
-        transfers = [x for x in ixs if x[0] == TOKEN_PROGRAM_ID]
+        transfers = [x for x in ixs if x[0] == program]
         tips = [x for x in ixs if x[0] == SYSTEM]
         assert len(tips) == (1 if last else 0)
         if last:
@@ -69,7 +69,7 @@ def test_every_chunk_fits_and_carries_exact_amounts(n, dup):
             assert data[9] == 6                        # decimals
             assert accts[1] == mint
             seen.append((str(accts[2]), amount))
-    expected = [(str(get_associated_token_address(Pubkey.from_string(w), mint)), a)
+    expected = [(str(get_associated_token_address(Pubkey.from_string(w), mint, program)), a)
                 for w, a in recipients]
     assert seen == expected
 
@@ -80,18 +80,18 @@ def test_worst_case_chunk_size_margin():
     c = _chain()
     mint = str(Keypair().pubkey())
     nine = [(str(Keypair().pubkey()), 10**15) for _ in range(CHUNK_SIZE)]
-    ten = nine + [(str(Keypair().pubkey()), 10**15)]
+    ten = [*nine, (str(Keypair().pubkey()), 10**15)]
     assert len(c.build_distribution_tx(mint, nine, 1, JITO_TIP_ACCOUNTS[0])) <= TX_SIZE_LIMIT
     assert len(c.build_distribution_tx(mint, ten, 1, JITO_TIP_ACCOUNTS[0])) > TX_SIZE_LIMIT
 
 
-def test_float_amount_encodes_exactly():
+def test_float_amount_rejected():
+    """Token amounts must be integer base units: a float means the
+    distribution math leaked floating point."""
     c = _chain()
-    mint = Keypair().pubkey()
-    raw = c.build_distribution_tx(str(mint), [(str(Keypair().pubkey()), 69930000000000.0)])
-    _, ixs = _decode(raw)
-    data = [d for p, _, d in ixs if p == TOKEN_PROGRAM_ID][0]
-    assert int.from_bytes(data[1:9], "little") == 69930000000000
+    with pytest.raises(TypeError):
+        c.build_distribution_tx(str(Keypair().pubkey()),
+                                [(str(Keypair().pubkey()), 69930000000000.0)])
 
 
 def test_off_curve_owner_pda_is_accepted():

@@ -53,7 +53,7 @@ class TestRefundReservation:
         """Two simultaneous 100% refund requests: the second must fail
         or be capped at what is actually available."""
         service.record_deposit(conn, 1, 1.0)
-        q1 = service.reserve_refund(conn, 1, 1.0, 30)
+        service.reserve_refund(conn, 1, 1.0, 30)
         # available is now 0 -> second reservation raises
         with pytest.raises(ValueError):
             service.reserve_refund(conn, 1, 1.0, 30)
@@ -141,6 +141,7 @@ class TestUnknownRefunds:
 
     def test_resolve_commits_when_landed(self, conn):
         import asyncio
+
         from curvebot import service as svc
 
         service.record_deposit(conn, 1, 2.0)

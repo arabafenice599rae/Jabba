@@ -1,0 +1,20 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 110
+
+[tool.ruff.lint]
+# correctness-oriented: pyflakes, import order, bugbear, swallowed
+# exceptions, async pitfalls, ruff-specific checks
+select = ["E4", "E7", "E9", "F", "I", "B", "BLE", "ASYNC", "RUF", "S110"]
+ignore = ["RUF001", "RUF002", "RUF003"]   # Italian text and emoji in strings
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["BLE", "B", "S", "RUF012", "RUF015", "RUF043", "RUF059", "E741", "ASYNC"]
+
+[tool.mypy]
+ignore_missing_imports = true
+check_untyped_defs = true
+files = ["curvebot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

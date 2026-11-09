@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from conftest import ADMIN, USERS, FakeChain, Recorder, make_call, make_message
 
-from conftest import ADMIN, USERS, FakeChain, Recorder, finding, make_call, make_message
-from curvebot import db, handlers as h, service
+from curvebot import db, service
+from curvebot import handlers as h
 from curvebot.keyboards import main_menu
 
 U = USERS[0]
@@ -197,3 +198,16 @@ def test_chart_callback_renders(cfg, conn, rec):
     _seed(conn)
     asyncio.run(h.cb_chart(make_call(U, "menu:chart", rec), cfg, conn))
     assert rec.photos == 1
+
+
+def test_chart_handler_sends_input_file(cfg, conn):
+    """aiogram rejects raw bytes: the handler must wrap the PNG."""
+    from aiogram.types import BufferedInputFile
+    sent = []
+
+    async def answer_photo(photo, caption=None, reply_markup=None, **kw):
+        sent.append(photo)
+    call = make_call(U, "menu:chart", Recorder())
+    call.message.answer_photo = answer_photo
+    asyncio.run(h.cb_chart(call, cfg, conn))
+    assert isinstance(sent[0], BufferedInputFile)

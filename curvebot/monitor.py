@@ -26,24 +26,39 @@ class DepositMonitor:
 
     async def _poll_sol_deposits(self):
         with self.conn_factory() as conn:
-            launched = db.get_meta(conn, "state") == "launched"
+            state = db.get_meta(conn, "state")
+            closed = state == "launched" or db.launch_lock_held(conn)
             wallet_map = {
                 row["wallet"]: row["telegram_id"]
                 for row in conn.execute(
                     "SELECT telegram_id, wallet FROM users WHERE wallet IS NOT NULL"
                 )
             }
-            transfers = await self.chain.incoming_sol_transfers()
-            for t in transfers:
-                key = f"{t['signature']}:{t.get('index', 0)}"
-                if db.sig_seen(conn, key):
-                    continue
-                if launched:
-                    log.warning("deposit after launch ignored: %s (%.6f SOL)",
-                                t["sender"], t["amount_sol"])
-                else:
-                    await self._process_transfer(conn, t, wallet_map)
-                db.mark_sig(conn, key)
+            transfers, examined = await self.chain.scan_incoming(
+                is_seen=lambda sig: db.sig_seen(conn, sig))
+            # credit + mark-as-seen in ONE transaction: a crash in between can
+            # neither lose a deposit nor credit it twice on restart
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for t in transfers:
+                    key = f"{t['signature']}:{t.get('index', 0)}"
+                    if db.sig_seen(conn, key):
+                        continue
+                    if closed:
+                        # after the launch snapshot: never credited, shows up
+                        # in /reconcile as missing_in_ledger for a manual refund
+                        log.warning("deposit after launch snapshot NOT credited: "
+                                    "%s (%.6f SOL) %s", t["sender"],
+                                    t["amount_sol"], key[:16])
+                    else:
+                        await self._process_transfer(conn, t, wallet_map)
+                    db.mark_sig(conn, key)
+                for sig in examined:
+                    db.mark_sig(conn, sig)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
 
     async def _process_transfer(self, conn, transfer, wallet_map):
         sender = transfer["sender"]

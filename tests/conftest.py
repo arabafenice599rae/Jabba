@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from curvebot import db  # noqa: E402
+from curvebot import db
 
 ADMIN = 1000
 USERS = [1001, 1002, 1003]
@@ -67,7 +67,7 @@ class FakeChain:
             await asyncio.sleep(self.send_delay)
         if self.fail_send:
             raise RuntimeError("rpc down")
-        lam = int(round(amount_sol * 1e9))
+        lam = round(amount_sol * 1e9)
         if lam > self.lamports:
             raise RuntimeError("insufficient funds")
         self.lamports -= lam
@@ -128,3 +128,14 @@ def _clear_pending():
     handlers.PENDING_REFUNDS.clear()
     yield
     handlers.PENDING_REFUNDS.clear()
+
+
+SVM_MODULES = ("test_svm.py", "test_fork_mainnet.py")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Run LiteSVM tests LAST: executing SBF programs leaves this process's
+    floating-point state altered (numpy floor_divide -> nan, see
+    litesvm_rpc._restore_fp_rounding), which would poison numpy/matplotlib
+    code in later tests."""
+    items.sort(key=lambda it: it.path.name in SVM_MODULES)
