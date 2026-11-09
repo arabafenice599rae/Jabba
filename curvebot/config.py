@@ -20,14 +20,16 @@ class Config:
     token_description: str = field(default_factory=lambda: _env("TOKEN_DESCRIPTION", ""))
     token_image_path: str = field(default_factory=lambda: _env("TOKEN_IMAGE_PATH", "token.png"))
     pinata_jwt: str = field(default_factory=lambda: _env("PINATA_JWT", ""))
-    safety_bps: int = field(default_factory=lambda: int(_env("SAFETY_BPS", "10")))
+    # buy_v3 buys an EXACT token amount: no margin needed (0 = 100% to users)
+    safety_bps: int = field(default_factory=lambda: int(_env("SAFETY_BPS", "0")))
     token_twitter: str = field(default_factory=lambda: _env("TOKEN_TWITTER", ""))
     token_telegram: str = field(default_factory=lambda: _env("TOKEN_TELEGRAM", ""))
     token_website: str = field(default_factory=lambda: _env("TOKEN_WEBSITE", ""))
     team_keep_percent: float = field(default_factory=lambda: float(_env("TEAM_KEEP_PERCENT", "10")))
     team_share_bps: int = field(default_factory=lambda: int(_env("TEAM_SHARE_BPS", "0")))
-    launch_slippage: float = field(default_factory=lambda: float(_env("LAUNCH_SLIPPAGE", "10")))
-    launch_priority_fee: float = field(default_factory=lambda: float(_env("LAUNCH_PRIORITY_FEE", "0.0005")))
+    # dynamic dev buy: never below this % of the raise (else the launch is
+    # refused: the raise is too small for the fixed costs)
+    min_dev_buy_percent: float = field(default_factory=lambda: float(_env("MIN_DEV_BUY_PERCENT", "50")))
     jito_tip_lamports: int = field(default_factory=lambda: int(_env("JITO_TIP_LAMPORTS", "1000000")))
 
     allowed_ids: list[int] = field(default_factory=lambda: [

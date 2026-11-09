@@ -1,18 +1,19 @@
 """OPT-IN (JABBA_FORK=1): the REAL run_launch against a mainnet fork.
 
-- PumpPortal is called for real (it only BUILDS the unsigned create tx)
+- the create tx is OUR create_v2 + buy_v3 (curvebot/pump_ix.py), executed
+  against the real pump.fun, Token-2022 and fee programs
 - every account the txs touch is cloned from mainnet into LiteSVM
 - the Jito bundle is executed in LiteSVM, in order, instead of being sent
 - only Pinata (metadata upload) is stubbed
 Nothing is ever submitted to mainnet. Run it before every real launch: it
-catches changes in pump.fun, PumpPortal fees/format or the token program.
+catches changes in pump.fun (accounts, discriminators, fees) or the token
+program before they can break a real launch.
 """
 from __future__ import annotations
 
 import asyncio
 import os
 
-import aiohttp
 import pytest
 from litesvm_rpc import MainnetFork, TxFailed
 from solders.keypair import Keypair
@@ -29,7 +30,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("JABBA_FORK") != "1",
 SOL = 1_000_000_000
 
 
-@pytest.mark.parametrize("n_users,sol_each", [(36, 0.25), (3, 2.0)])
+@pytest.mark.parametrize("n_users,sol_each", [(36, 0.25), (3, 2.0), (3, 0.1 / 3)])
 def test_real_launch_on_mainnet_fork(monkeypatch, cfg, conn, n_users, sol_each):
     fork = MainnetFork(os.environ.get("JABBA_FORK_RPC", "https://api.mainnet-beta.solana.com"))
     chain = Chain.__new__(Chain)
@@ -60,9 +61,12 @@ def test_real_launch_on_mainnet_fork(monkeypatch, cfg, conn, n_users, sol_each):
     monkeypatch.setattr(L, "wait_bundle", wait)
     chain.send_bundle = bundle_in_fork
 
-    async def go():
-        async with aiohttp.ClientSession() as http:
-            return await L.run_launch(chain, cfg, conn, http)
+    async def tips(http):
+        return ["96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5"]
+    chain.fetch_tip_accounts = tips
+
+    async def go():                     # no HTTP at all: Pinata and Jito are stubbed
+        return await L.run_launch(chain, cfg, conn, None)
     try:
         report = asyncio.run(go())
     except RuntimeError:

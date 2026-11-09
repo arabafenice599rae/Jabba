@@ -56,17 +56,26 @@ def test_curve_non_positive(s):
 
 
 def test_curve_matches_mainnet_fork_measurement():
-    """Measured 2026-11-08 executing a real PumpPortal create (amount=1 SOL)
-    on a mainnet fork: the treasury ATA received exactly this many tokens."""
+    """Measured on a mainnet fork (PumpPortal create 2026-11-08, our own
+    buy_v3 2026-11-09): for 1 SOL the treasury got exactly this many tokens."""
     assert pc.tokens_out_for_sol(1.0) == 34_612_903_225_806
 
 
-def test_dev_buy_cost_matches_mainnet_fork_measurement():
-    """Same fork run (classic rent): the treasury paid 1.030245679 SOL, i.e.
-    the cost below + 0.0005 priority fee + 2 signatures (10_000 lamports).
-    With mainnet's lower rent the real cost is slightly LESS: upper bound."""
-    assert pc.dev_buy_total_cost_lamports(1.0) + 500_000 + 10_000 == \
-        pytest.approx(1_030_245_679, abs=2)
+def test_max_sol_cost_covers_the_real_fork_cost():
+    """Fork 2026-11-09, our create_v2 + buy_v3 for 1 SOL: the treasury paid
+    1.02112568 SOL = 1 (curve) + 0.0125 (fees 1.25%) + 0.00861568 (rent)
+    + 0.00001 (2 signatures). buy_v3's cap must cover curve + fees."""
+    paid_curve_and_fees = 1_021_125_680 - 8_615_680 - 10_000
+    assert pc.max_sol_cost_lamports(1.0) >= paid_curve_and_fees
+    assert pc.max_sol_cost_lamports(1.0) - paid_curve_and_fees < 0.006e9   # tight cap
+
+
+@SETTINGS
+@given(st.integers(2, 200 * 10**9))
+def test_affordable_is_the_exact_inverse_of_the_cap(budget):
+    s = pc.curve_sol_affordable(budget)
+    assert pc.max_sol_cost_lamports(s / 1e9) <= budget + 1
+    assert pc.max_sol_cost_lamports((s + 2) / 1e9) > budget
 
 
 @pytest.mark.parametrize("raised", [96.0, 120.0, 300.0])

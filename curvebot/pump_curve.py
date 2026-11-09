@@ -11,14 +11,15 @@ against the live on-chain global account of the pump program
 
 The creator fee (30 bps) is charged on top of the protocol fee.
 
-How the dev buy really executes (measured on a mainnet fork, 2026-11-08,
-PumpPortal trade-local create, amount=1 SOL, denominatedInSol):
-  - `amount` is the SOL that goes INTO THE CURVE; tokens received are exactly
-    floor(VTR0 * amount / (VSR0 + amount))  (34_612_903_225_806 for 1 SOL)
-  - fees are charged ON TOP: protocol 95 bps + creator 30 bps + PumpPortal 50 bps
-  - plus one-off rent for the accounts the create opens (mint with metadata,
-    bonding curve, its ATA, treasury ATA, creator vault, volume accumulator)
-  - the mint is Token-2022 (create_v2)
+How the dev buy really executes (measured on a mainnet fork, 2026-11-09,
+our own create_v2 + buy_v3, see pump_ix.py):
+  - buy_v3 buys an EXACT token amount; for S SOL into a virgin curve that is
+    floor(VTR0 * S / (VSR0 + S))  (34_612_903_225_806 for 1 SOL)
+  - fees are charged ON TOP: protocol 95 bps + creator 30 bps (= 1.25%;
+    with buy_v3 most of it stays on the curve until swept)
+  - plus one-off rent for the accounts the create + buy open: the Token-2022
+    mint (size grows with name/symbol/uri), bonding curve, its ATA, the
+    treasury's ATA and its user_volume_accumulator
 Re-verify the parameters before launch with `verify_params()`.
 """
 
@@ -28,14 +29,30 @@ RTR0 = 793_100_000 * 10 ** 6      # initial real token reserves (base units)
 SUPPLY = 1_000_000_000 * 10 ** 6  # total supply (base units)
 PROTOCOL_FEE_BPS = 95             # on-chain global.fee_basis_points
 CREATOR_FEE_BPS = 30              # creator share (separate fee program)
-PUMPPORTAL_FEE_BPS = 50           # PumpPortal local API fee (measured)
 TOTAL_FEE_BPS = PROTOCOL_FEE_BPS + CREATOR_FEE_BPS
-# sum of rents opened by create+buy, measured with the classic rent
-# (3480 x 2y). Mainnet rent is ~27% lower since 2026: an upper bound.
-CREATE_RENT_LAMPORTS = 12_235_680
+# max fee we accept in buy_v3's max_sol_cost (and budget in the preflight):
+# if pump.fun raises fees beyond this, the bundle fails atomically
+FEE_CAP_BPS = TOTAL_FEE_BPS + 50
 DECIMALS = 6
 # SOL into the curve at which the dev buy would take all real reserves
 MAX_DEV_BUY_LAMPORTS = VSR0 * RTR0 // (VTR0 - RTR0)
+
+# sizes (bytes) of the accounts opened by create_v2 + ATA + buy_v3 (fork)
+MINT_BASE_SIZE = 316              # + bytes of name + symbol + uri (metadata)
+CURVE_SIZE, VOLUME_ACC_SIZE, TOKEN_ACCOUNT_SIZE = 166, 137, 170
+CLASSIC_RENT_PER_BYTE = 3480 * 2  # pre-2026 rent: an upper bound if RPC fails
+
+
+def create_account_sizes(name: str, symbol: str, uri: str) -> list[int]:
+    """Accounts the launch's first tx creates and pays rent for:
+    mint, bonding curve, curve ATA, treasury ATA, volume accumulator."""
+    meta = len(name.encode()) + len(symbol.encode()) + len(uri.encode())
+    return [MINT_BASE_SIZE + meta, CURVE_SIZE, TOKEN_ACCOUNT_SIZE,
+            TOKEN_ACCOUNT_SIZE, VOLUME_ACC_SIZE]
+
+
+def classic_rent(size: int) -> int:
+    return (size + 128) * CLASSIC_RENT_PER_BYTE
 
 
 def sol_to_lamports(sol: float) -> int:
@@ -52,12 +69,21 @@ def tokens_out_for_sol(sol_into_curve: float) -> int:
     return min(VTR0 * lamports // (VSR0 + lamports), RTR0)
 
 
-def dev_buy_total_cost_lamports(sol_into_curve: float) -> int:
-    """Everything the treasury pays for the create+dev-buy tx except the
-    priority fee: curve SOL + all fees on top + one-off create rents."""
+def max_sol_cost_lamports(sol_into_curve: float) -> int:
+    """buy_v3's max_sol_cost: curve SOL + fees at FEE_CAP_BPS, rounded up."""
     lamports = sol_to_lamports(sol_into_curve)
-    fees = lamports * (TOTAL_FEE_BPS + PUMPPORTAL_FEE_BPS) // 10_000
-    return lamports + fees + CREATE_RENT_LAMPORTS
+    return lamports + -(-lamports * FEE_CAP_BPS // 10_000) + 1
+
+
+def curve_sol_affordable(budget_lamports: int) -> int:
+    """Inverse of max_sol_cost_lamports: the most curve SOL (lamports) whose
+    capped cost fits in `budget_lamports`."""
+    if budget_lamports <= 1:
+        return 0
+    s = (budget_lamports - 1) * 10_000 // (10_000 + FEE_CAP_BPS)
+    while s > 0 and s + -(-s * FEE_CAP_BPS // 10_000) + 1 > budget_lamports:
+        s -= 1
+    return s
 
 
 def verify_params(raw_global_account: bytes) -> dict:

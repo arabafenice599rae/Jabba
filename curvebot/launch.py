@@ -3,13 +3,15 @@ distribution chunks, all in the same slot. If any tx fails, everything
 reverts — the treasury never holds tokens in any confirmed state.
 
 Verified facts (2026-11):
-- PumpPortal creation goes through POST /api/trade-local with
-  action="create" and a JSON body; the response is the raw unsigned tx
-  (octet-stream). The dev buy is INCLUDED in the create tx; metadata must
-  be uploaded to IPFS (Pinata) beforehand.
+- The first tx is OUR create_v2 + treasury ATA + buy_v3 of an EXACT token
+  amount, built on the pump.fun program (pump_ix.py, official IDL): no
+  PumpPortal, no third-party router. Metadata is uploaded to IPFS (Pinata)
+  beforehand.
+- The dev buy is DYNAMIC (plan_dev_buy): the target share of the raise,
+  lowered to what the treasury can pay after every exact cost.
 - pump.fun global account: VTR 1.073B, VSR 30 SOL, fee 95 bps protocol
   (+30 bps creator), 6 decimals, supply 1B. Verified at launch time.
-- The mint is Token-2022; `amount` is curve SOL, fees on top (see
+- The mint is Token-2022; fees are paid on top of the curve SOL (see
   pump_curve). All of this is re-checked by tests/test_fork_mainnet.py.
 
 Distribution math works in integer BASE UNITS (10**6) so the invariant
@@ -34,11 +36,15 @@ from pathlib import Path
 import aiohttp
 
 from . import db, service
-from .chain import token_program_of_create_tx
+from .chain import TOKEN_2022_PROGRAM
 from .pump_curve import (
     DECIMALS,
     MAX_DEV_BUY_LAMPORTS,
-    dev_buy_total_cost_lamports,
+    TOKEN_ACCOUNT_SIZE,
+    classic_rent,
+    create_account_sizes,
+    curve_sol_affordable,
+    max_sol_cost_lamports,
     params_match,
     sol_to_lamports,
     tokens_out_for_sol,
@@ -47,13 +53,13 @@ from .pump_curve import (
 
 log = logging.getLogger("launch")
 
-PUMPPORTAL_BASE = "https://pumpportal.fun/api"
 GLOBAL_ACCOUNT = "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"
 TX_SIZE_LIMIT = 1232
 BYTES_PER_RECIPIENT = 92          # measured: ATA create + transfer_checked
 TIP_OVERHEAD = 64                 # measured: tip transfer ix + account key
 BASE_TX_OVERHEAD = 294            # measured: header + shared accounts
 CHUNK_SIZE = 9                    # (1232 - 294 - 64) // 92 == 9
+METADATA_URI_BUDGET = "https://ipfs.io/ipfs/" + "b" * 59   # a Pinata CIDv1 URI
 MAX_DIST_TXS = 4                  # bundle = create + 4 chunks = 5 txs
 MAX_PARTICIPANTS = CHUNK_SIZE * MAX_DIST_TXS
 
@@ -89,32 +95,73 @@ def compute_distribution(weights: dict[int, float], tokens_base: int,
     return out, team, dust
 
 
-TOKEN_ACCOUNT_SIZE = 170                  # Token-2022 ATA (ImmutableOwner ext)
-TOKEN_ACCOUNT_RENT_LAMPORTS = 2_074_080   # rent-exempt minimum, 170 B (measured)
-NETWORK_FEE_LAMPORTS = 5_000              # per tx
-BUNDLE_TX_COUNT = 5
+NETWORK_FEE_LAMPORTS = 5_000              # per signature
+
+
+async def _rent(chain, size: int) -> int:
+    try:
+        return (await chain.client.get_minimum_balance_for_rent_exemption(size)).value
+    except Exception:  # noqa: BLE001 - RPC hiccup: the classic rent is an upper bound
+        return classic_rent(size)
 
 
 async def estimate_launch_costs(chain, cfg, n_recipients: int,
                                 dev_buy_sol: float) -> dict:
-    """Full cost of the launch: dev buy with fees on top and create rents
-    + ATA rent for every recipient (worst case: none exists yet) + network
-    fees + priority fee + tip."""
-    try:
-        resp = await chain.client.get_minimum_balance_for_rent_exemption(
-            TOKEN_ACCOUNT_SIZE)
-        rent = resp.value
-    except Exception:  # noqa: BLE001 - RPC hiccup: measured constant is safe
-        rent = TOKEN_ACCOUNT_RENT_LAMPORTS
+    """Full cost of the launch, in lamports, from LIVE rent:
+    dev buy at the fee cap + rent of the accounts the create opens + ATA rent
+    for every recipient (worst case: none exists yet) + signatures + tip +
+    the treasury's own rent-exempt minimum.
+    No priority fee: inside a Jito bundle the tip pays for inclusion."""
+    sizes = create_account_sizes(cfg.token_name or "x", cfg.token_symbol or "x",
+                                 METADATA_URI_BUDGET)
+    create_rent = 0
+    for size in sizes:
+        create_rent += await _rent(chain, size)
+    n_dist_txs = max(1, -(-n_recipients // CHUNK_SIZE))
     breakdown = {
-        "dev_buy": dev_buy_total_cost_lamports(dev_buy_sol),
-        "ata_rent": rent * n_recipients,
-        "network_fees": NETWORK_FEE_LAMPORTS * BUNDLE_TX_COUNT,
-        "priority_fee": int(cfg.launch_priority_fee * 1_000_000_000),
+        "dev_buy": max_sol_cost_lamports(dev_buy_sol),
+        "create_rent": create_rent,
+        "ata_rent": await _rent(chain, TOKEN_ACCOUNT_SIZE) * n_recipients,
+        "network_fees": NETWORK_FEE_LAMPORTS * (2 + n_dist_txs),
         "jito_tip": cfg.jito_tip_lamports,
+        # the treasury must stay rent-exempt after the bundle, otherwise
+        # the last tx fails with InsufficientFundsForRent (found on the fork)
+        "treasury_reserve": await _rent(chain, 0),
     }
     breakdown["total"] = sum(breakdown.values())
     return breakdown
+
+
+async def plan_dev_buy(chain, cfg, n_recipients: int, raised_sol: float,
+                       treasury_lamports: int) -> tuple[float, dict]:
+    """DYNAMIC dev buy: the target is raised x (100 - TEAM_KEEP_PERCENT)%,
+    lowered if needed to what the treasury can pay after every exact cost.
+    The team gets whatever is left. Refuses when the dev buy would fall
+    below MIN_DEV_BUY_PERCENT of the raise (costs too large for the raise)
+    or reach the curve's real reserves."""
+    target = raised_sol * (100.0 - cfg.team_keep_percent) / 100.0
+    fixed = await estimate_launch_costs(chain, cfg, n_recipients, 0.0)
+    budget = treasury_lamports - (fixed["total"] - fixed["dev_buy"])
+    affordable = curve_sol_affordable(budget) / 1_000_000_000
+    dev = min(target, affordable)
+    floor = raised_sol * cfg.min_dev_buy_percent / 100.0
+    if dev <= 0 or dev < floor:
+        raise RuntimeError(
+            f"raccolta troppo piccola per i costi fissi: il dev buy sarebbe "
+            f"{max(dev, 0):.6f} SOL, sotto il minimo del "
+            f"{cfg.min_dev_buy_percent:.0f}% della raccolta ({floor:.6f} SOL). "
+            f"Costi fissi {(fixed['total'] - fixed['dev_buy']) / 1e9:.6f} SOL, "
+            f"treasury {treasury_lamports / 1e9:.6f} SOL")
+    if sol_to_lamports(dev) >= MAX_DEV_BUY_LAMPORTS:
+        raise RuntimeError(
+            f"dev buy {dev:.4f} SOL >= capacita della curva "
+            f"({MAX_DEV_BUY_LAMPORTS / 1e9:.3f} SOL): la distribuzione "
+            f"supererebbe le riserve reali")
+    costs = await estimate_launch_costs(chain, cfg, n_recipients, dev)
+    if costs["total"] > treasury_lamports:          # defensive: never sign
+        raise RuntimeError("treasury insufficiente per il dev buy pianificato")
+    costs["team_left"] = treasury_lamports - costs["total"]
+    return dev, costs
 
 
 def plan_chunks(recipients: list) -> list[list]:
@@ -171,33 +218,6 @@ async def fetch_global_account(chain) -> bytes:
     if resp.value is None:
         raise RuntimeError("pump.fun global account non trovato")
     return bytes(resp.value.data)
-
-
-class PumpPortal:
-    def __init__(self, http: aiohttp.ClientSession):
-        self.http = http
-
-    async def create_with_devbuy(self, payer: str, mint: str, uri: str,
-                                 name: str, symbol: str,
-                                 dev_buy_sol: float, slippage: float,
-                                 priority_fee: float) -> bytes:
-        """Create tx INCLUDING the dev buy. Returns the UNSIGNED tx as raw
-        bytes (application/octet-stream). The API only accepts JSON bodies."""
-        payload = {
-            "publicKey": payer,
-            "action": "create",
-            "tokenMetadata": {"name": name, "symbol": symbol, "uri": uri},
-            "mint": mint,
-            "denominatedInSol": "true",
-            "amount": dev_buy_sol,
-            "slippage": slippage,
-            "priorityFee": priority_fee,
-            "pool": "pump",
-        }
-        async with self.http.post(f"{PUMPPORTAL_BASE}/trade-local",
-                                  json=payload) as r:
-            r.raise_for_status()
-            return await r.read()
 
 
 def parse_inflight_status(data: dict) -> str:
@@ -335,38 +355,27 @@ async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> d
     raised = db.total_raised(conn)
     if raised <= 0:
         raise RuntimeError("nessun contributo raccolto")
-    dev_buy_sol = raised * (100.0 - cfg.team_keep_percent) / 100.0
-    if sol_to_lamports(dev_buy_sol) >= MAX_DEV_BUY_LAMPORTS:
-        raise RuntimeError(
-            f"dev buy {dev_buy_sol:.4f} SOL >= capacita della curva "
-            f"({MAX_DEV_BUY_LAMPORTS / 1e9:.3f} SOL): la distribuzione "
-            f"supererebbe le riserve reali")
     contributions = {u: c for u, c in service.shares(conn).items() if c > 0}
-    costs = await estimate_launch_costs(chain, cfg, len(contributions),
-                                        dev_buy_sol)
     treasury_lamports = int((await chain.balance_sol()) * 1_000_000_000)
-    if treasury_lamports < costs["total"]:
-        raise RuntimeError(
-            f"treasury insufficiente: servono {costs['total'] / 1e9:.6f} SOL "
-            f"(dev buy {costs['dev_buy'] / 1e9:.4f} + rent ATA "
-            f"{costs['ata_rent'] / 1e9:.4f} + fee {costs['network_fees'] / 1e9:.6f} "
-            f"+ priority {costs['priority_fee'] / 1e9:.6f} + tip "
-            f"{costs['jito_tip'] / 1e9:.4f}), disponibili "
-            f"{treasury_lamports / 1e9:.6f} SOL")
+    dev_buy_sol, costs = await plan_dev_buy(
+        chain, cfg, len(contributions), raised, treasury_lamports)
 
     from solders.keypair import Keypair
     mint_kp = Keypair()
     mint = str(mint_kp.pubkey())
 
     uri = await upload_pinata_metadata(http, cfg)
-    portal = PumpPortal(http)
-    create_raw = await portal.create_with_devbuy(
-        chain.pubkey, mint, uri, cfg.token_name, cfg.token_symbol,
-        dev_buy_sol, cfg.launch_slippage, cfg.launch_priority_fee)
-    tx_create = chain.sign_versioned(create_raw, extra_signers=[mint_kp])
-    token_program = token_program_of_create_tx(create_raw)
+    amount = tokens_out_for_sol(dev_buy_sol)       # buy_v3 buys EXACTLY this
+    await chain.refresh_blockhash()
+    tx_create = chain.build_create_tx(
+        mint_kp, cfg.token_name, cfg.token_symbol, uri, amount,
+        max_sol_cost_lamports(dev_buy_sol))
+    if len(tx_create) > TX_SIZE_LIMIT:
+        raise RuntimeError(f"tx di creazione {len(tx_create)} byte > "
+                           f"{TX_SIZE_LIMIT}: accorciare nome, simbolo o uri")
+    token_program = TOKEN_2022_PROGRAM
 
-    expected = tokens_out_for_sol(dev_buy_sol)
+    expected = amount
     dist, team, dust = compute_distribution(
         contributions, expected, cfg.team_share_bps, cfg.safety_bps)
 
@@ -376,7 +385,6 @@ async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> d
     chunks = plan_chunks(recipients)
 
     tip_accounts = await chain.fetch_tip_accounts(http)
-    await chain.refresh_blockhash()
     dist_txs = []
     for i, chunk in enumerate(chunks):
         is_last = i == len(chunks) - 1
@@ -413,12 +421,14 @@ async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> d
     db.set_meta(conn, "state", "launched")
     db.set_meta(conn, "mint", mint)
     log.info("launch landed: mint=%s dev_buy=%.4f distributed=%d base units "
-             "to %d wallets (team=%d, dust=%d)",
-             mint, dev_buy_sol, sent_base, len(recipients), team, dust)
+             "to %d wallets (team=%d, dust=%d, SOL left to team ~%.6f)",
+             mint, dev_buy_sol, sent_base, len(recipients), team, dust,
+             costs["team_left"] / 1e9)
     return {"mint": mint, "bundle_id": bundle_id, "status": status,
             "dev_buy_sol": dev_buy_sol,
             "tokens_bought": expected / 10 ** DECIMALS,
             "distributed": sent_base / 10 ** DECIMALS,
             "team_tokens": team / 10 ** DECIMALS,
             "dust_tokens": dust / 10 ** DECIMALS,
+            "team_sol_left": costs["team_left"] / 1e9,
             "wallets": len(recipients)}

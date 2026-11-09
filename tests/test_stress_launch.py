@@ -1,4 +1,4 @@
-"""run_launch end-to-end with simulated RPC / Pinata / PumpPortal / Jito.
+"""run_launch end-to-end with simulated RPC / Pinata / Jito.
 Real Chain object, real tx building and signing; only the network is fake."""
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from solders.keypair import Keypair
 from curvebot import db, service
 from curvebot import launch as L
 from curvebot import pump_curve as pc
+from curvebot import pump_ix as P
 from curvebot.chain import JITO_TIP_ACCOUNTS, Chain
 from curvebot.monitor import DepositMonitor
 
@@ -43,19 +44,12 @@ class RPC:
         return SimpleNamespace(value=SimpleNamespace(blockhash=Hash.default()))
 
 
-def _unsigned_create_tx(payer: str, mint: str) -> bytes:
-    """Unsigned v0 tx shaped like PumpPortal's: references Token-2022."""
-    from solders.instruction import AccountMeta, Instruction
-    from solders.message import MessageV0
-    from solders.null_signer import NullSigner
-    from solders.pubkey import Pubkey
+def _decode_create(raw: bytes):
+    """(program, data) of each instruction of the create tx."""
     from solders.transaction import VersionedTransaction
-    payer_pk, mint_pk = Pubkey.from_string(payer), Pubkey.from_string(mint)
-    t22 = Pubkey.from_string("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb")
-    ix = Instruction(t22, b"\x00", [AccountMeta(mint_pk, True, True),
-                                    AccountMeta(payer_pk, True, True)])
-    msg = MessageV0.try_compile(payer_pk, [ix], [], Hash.default())
-    return bytes(VersionedTransaction(msg, [NullSigner(payer_pk), NullSigner(mint_pk)]))
+    tx = VersionedTransaction.from_bytes(raw)
+    keys = tx.message.account_keys
+    return tx, [(str(keys[ix.program_id_index]), bytes(ix.data)) for ix in tx.message.instructions]
 
 
 @pytest.fixture
@@ -69,13 +63,6 @@ def world(monkeypatch, conn):
     async def fake_pinata(http, cfg):
         return "https://ipfs.io/ipfs/meta"
 
-    class FakePortal:
-        def __init__(self, http):
-            pass
-
-        async def create_with_devbuy(self, payer, mint, *a, **k):
-            return _unsigned_create_tx(payer, mint)
-
     async def send_bundle(http, txs):
         state["bundle"] = txs
         return "bundle-1"
@@ -87,9 +74,7 @@ def world(monkeypatch, conn):
         return list(JITO_TIP_ACCOUNTS)
 
     monkeypatch.setattr(L, "upload_pinata_metadata", fake_pinata)
-    monkeypatch.setattr(L, "PumpPortal", FakePortal)
     monkeypatch.setattr(L, "wait_bundle", wait_bundle)
-    c.sign_versioned = lambda raw, extra_signers=None: b"create-tx"
     c.send_bundle = send_bundle
     c.fetch_tip_accounts = tips
 
@@ -115,7 +100,17 @@ def test_launch_success_bundle_shape(world, cfg, conn, n):
     world.seed(n, 0.5)
     rep = _run(world, cfg, conn)
     bundle = world.state["bundle"]
-    assert bundle[0] == b"create-tx"
+    tx, ixs = _decode_create(bundle[0])
+    assert len(bundle[0]) <= L.TX_SIZE_LIMIT
+    assert len(tx.signatures) == 2                      # treasury + mint
+    assert [d[:8].hex() for p, d in ixs if p == P.PUMP_PROGRAM] == \
+        [P.CREATE_V2.hex(), P.BUY_V3.hex()]               # no PumpPortal router
+    buy = next(d for p, d in ixs if p == P.PUMP_PROGRAM and d[:8] == P.BUY_V3)
+    amount = int.from_bytes(buy[8:16], "little")
+    assert amount == round(rep["tokens_bought"] * 10**6)  # exact buy...
+    dust = round(rep["dust_tokens"] * 10**6)
+    assert round(rep["distributed"] * 10**6) + dust == amount  # ...all distributed
+    assert dust < n                                       # floor rounding only
     assert len(bundle) == 1 + -(-n // L.CHUNK_SIZE) <= 5
     assert all(len(tx) <= L.TX_SIZE_LIMIT for tx in bundle[1:])
     assert rep["wallets"] == n
@@ -131,10 +126,10 @@ def test_launch_aborts_on_curve_param_change(world, cfg, conn):
     assert world.state["bundle"] is None
 
 
-def test_launch_aborts_when_treasury_short(world, cfg, conn):
+def test_launch_aborts_when_treasury_far_too_short(world, cfg, conn):
     world.seed(3, 1.0)
-    world.chain.client.lamports = int(2.0 * 1e9)      # less than dev buy + costs
-    with pytest.raises(RuntimeError, match="treasury insufficiente"):
+    world.chain.client.lamports = int(0.4 * 1e9)      # can't fund half the raise
+    with pytest.raises(RuntimeError, match="troppo piccola"):
         _run(world, cfg, conn)
     assert world.state["bundle"] is None
 
@@ -155,11 +150,14 @@ def test_launch_unknown_outcome_blocks_refunds(world, cfg, conn):
     assert db.get_meta(conn, "state") not in (None, "")
 
 
-def test_preflight_includes_create_rent(world, cfg, conn):
+def test_zero_team_keep_lowers_the_dev_buy_to_fit(world, cfg, conn):
+    """TEAM_KEEP_PERCENT=0 used to be refused; the dynamic dev buy now
+    takes exactly what is left after every cost."""
     cfg.team_keep_percent = 0.0
-    world.seed(5, 1.0, extra_lamports=40_000_000)    # covers our estimate only
-    with pytest.raises(RuntimeError, match="treasury insufficiente"):
-        _run(world, cfg, conn)
+    world.seed(5, 1.0)
+    rep = _run(world, cfg, conn)
+    assert 4.8 < rep["dev_buy_sol"] < 5.0
+    assert 0 <= rep["team_sol_left"] < 0.001
 
 
 def test_launch_rejects_raise_beyond_curve_capacity(world, cfg, conn):
@@ -169,15 +167,12 @@ def test_launch_rejects_raise_beyond_curve_capacity(world, cfg, conn):
     assert world.state["bundle"] is None
 
 
-def test_safety_margin_vs_slippage(world, cfg, conn):
-    """Documents the margin: SAFETY_BPS=10 (0.1%) is all that protects the
-    distribution if the real dev buy returns fewer tokens than computed,
-    while LAUNCH_SLIPPAGE allows 10%. Report the ratio."""
-    world.seed(4, 2.0)
+def test_small_test_launch_now_starts(world, cfg, conn):
+    """0.1 SOL from 3 wallets: refused with the fixed 90% dev buy."""
+    world.seed(3, 0.1 / 3)
     rep = _run(world, cfg, conn)
-    margin = 1 - rep["distributed"] / rep["tokens_bought"]
-    assert margin == pytest.approx(cfg.safety_bps / 10_000, abs=1e-6)
-    assert margin < cfg.launch_slippage / 100     # margin << allowed slippage
+    assert 0.07 < rep["dev_buy_sol"] < 0.09
+    assert rep["tokens_bought"] - rep["distributed"] < 1e-5  # SAFETY_BPS=0: all to users
 
 
 def test_monitor_stops_after_launch(db_path, cfg):
