@@ -190,3 +190,66 @@ def test_resolve_unknown_launch_reads_the_chain(world, cfg, conn, on_chain, age,
     assert out == expected
     assert (db.get_meta(conn, "state") or "") == state
     assert db.launch_lock_held(conn) is locked
+    if expected == "landed":            # same bookkeeping as the normal path
+        assert db.get_meta(conn, "mint") == mint
+        row = conn.execute("SELECT mint, dev_buy_sol, tokens_distributed FROM launches").fetchone()
+        assert row["mint"] == mint and row["dev_buy_sol"] > 0 and row["tokens_distributed"] > 0
+    else:
+        assert conn.execute("SELECT COUNT(*) FROM launches").fetchone()[0] == 0
+
+
+def test_reconcile_command_runs_against_the_real_chain_api(cfg, conn):
+    """Merge #6 left /reconcile calling incoming_sol_transfers(max_signatures=50),
+    an argument that no longer existed: the command crashed on every call."""
+    from conftest import ADMIN, make_message
+    from solders.keypair import Keypair
+    seen_kw = {}
+
+    class Client:
+        async def get_signatures_for_address(self, pk, **kw):
+            seen_kw.update(kw)
+            return SimpleNamespace(value=[])
+    chain = Chain.__new__(Chain)
+    chain.keypair, chain.client = Keypair(), Client()
+    rec = Recorder()
+    asyncio.run(h.cmd_reconcile(make_message(ADMIN, rec), cfg, conn, chain))
+    assert "Nessuna discrepanza" in rec.last
+    assert seen_kw["limit"] == 50                 # the advertised 50-tx window
+
+
+def test_unknown_refund_never_matches_an_already_booked_transfer(conn):
+    """Two refunds of the same amount: the first landed and is booked, the
+    second never left. Matching by amount alone booked the second against
+    the first one's signature: the user lost that contribution."""
+    db.set_wallet(conn, 1, WALLET)
+    service.record_deposit(conn, 1, 4.0)
+    q1 = service.reserve_refund(conn, 1, 0.25, 30)
+    service.commit_refund(conn, q1["pending_id"], signature="OLD_SIG")
+    service.record_deposit(conn, 1, 1.0)
+    q2 = service.reserve_refund(conn, 1, 0.25, 30)
+    service.mark_refund_unknown(conn, q2["pending_id"])
+
+    class OnlyTheOldOne:
+        async def transfers_to_wallet(self, wallet, max_signatures=25):
+            return [{"signature": "OLD_SIG", "amount_sol": q1["net_sol"]}]
+    assert asyncio.run(service.resolve_unknown_refunds(conn, OnlyTheOldOne())) == []
+    assert db.user_contribution(conn, 1) == pytest.approx(4.0)
+    assert len(db.list_unknown_refunds(conn)) == 1          # still held
+
+
+def test_two_unknown_refunds_need_two_distinct_transfers(conn):
+    db.set_wallet(conn, 1, WALLET)
+    service.record_deposit(conn, 1, 4.0)
+    qa = service.reserve_refund(conn, 1, 0.25, 30)
+    service.mark_refund_unknown(conn, qa["pending_id"])
+    service.record_deposit(conn, 1, 1.0)
+    qb = service.reserve_refund(conn, 1, 0.25, 30)
+    service.mark_refund_unknown(conn, qb["pending_id"])
+    assert qa["net_sol"] == pytest.approx(qb["net_sol"])
+
+    class One:
+        async def transfers_to_wallet(self, wallet, max_signatures=25):
+            return [{"signature": "S1", "amount_sol": qa["net_sol"]}]
+    out = asyncio.run(service.resolve_unknown_refunds(conn, One()))
+    assert [r["outcome"] for r in out] == ["committed"]
+    assert len(db.list_unknown_refunds(conn)) == 1

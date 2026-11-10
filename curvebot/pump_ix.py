@@ -157,3 +157,72 @@ def create_and_buy_ixs(mint, user, name: str, symbol: str, uri: str,
             token_program_id=_pk(TOKEN_2022)),
         buy_v3_ix(mint, user, amount, max_sol_cost),
     ]
+
+# --- creator fee sweep (docs/instructions/COLLECT_CREATOR_FEE.md, Oct 2026) ---
+# Discriminators measured from the official IDLs (idl/pump.json,
+# idl/pump_amm.json) — NOT from secondary sources.
+PUMP_AMM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+COLLECT_CREATOR_FEE_V2 = bytes([207, 17, 138, 242, 4, 34, 19, 56])
+COLLECT_COIN_CREATOR_FEE = bytes([160, 57, 89, 42, 181, 139, 43, 66])
+
+
+def creator_vault(creator):
+    """Pump PDA [b"creator-vault", creator]: holds curve-phase fees."""
+    return pda([b"creator-vault", bytes(_pk(creator))])
+
+
+def creator_vault_balance_accounts(creator):
+    """The two accounts to read for a balance report (SOL-paired)."""
+    vault = creator_vault(creator)
+    return vault, ata(vault, WSOL, SPL_TOKEN)
+
+
+def collect_creator_fee_v2_ix(creator):
+    """Sweep the BONDING-CURVE creator vault (SOL-paired): lamports go
+    from creator_vault to the creator's wallet. Permissionless."""
+    from solders.instruction import AccountMeta, Instruction
+
+    creator = _pk(creator)
+    vault = creator_vault(creator)
+
+    def m(k, w=False, s=False):
+        return AccountMeta(_pk(k), is_signer=s, is_writable=w)
+
+    accounts = [
+        m(creator, w=True, s=True),                       # creator (signer)
+        m(ata(creator, WSOL, SPL_TOKEN), w=True),         # creator_token_account
+        m(vault, w=True),                                 # creator_vault
+        m(ata(vault, WSOL, SPL_TOKEN), w=True),           # creator_vault_token_account
+        m(WSOL),                                          # quote_mint
+        m(SPL_TOKEN),                                     # quote_token_program
+        m(ATA_PROGRAM),                                  # associated_token_program
+        m(SYSTEM),                                       # system_program
+        m(pda([b"__event_authority"])),                  # event_authority
+        m(PUMP_PROGRAM),                                 # program
+    ]
+    return Instruction(_pk(PUMP_PROGRAM), COLLECT_CREATOR_FEE_V2, accounts)
+
+
+def collect_coin_creator_fee_ix(creator):
+    """Sweep the PUMPSWAP (post-graduation) coin-creator vault ATA
+    (SOL-paired) into the creator's WSOL account. Permissionless; fails
+    harmlessly if the coin has not graduated (vault ATA absent)."""
+    from solders.instruction import AccountMeta, Instruction
+
+    creator = _pk(creator)
+    vault_authority = pda([b"creator_vault", bytes(creator)], PUMP_AMM)
+
+    def m(k, w=False, s=False):
+        return AccountMeta(_pk(k), is_signer=s, is_writable=w)
+
+    accounts = [
+        m(WSOL),                                          # quote_mint
+        m(SPL_TOKEN),                                     # quote_token_program
+        m(creator, s=True),                                # coin_creator
+        m(vault_authority),                               # coin_creator_vault_authority
+        m(ata(vault_authority, WSOL, SPL_TOKEN), w=True), # coin_creator_vault_ata
+        m(ata(creator, WSOL, SPL_TOKEN), w=True),         # coin_creator_token_account
+        m(pda([b"__event_authority"], PUMP_AMM)),         # event_authority (AMM)
+        m(PUMP_AMM),                                      # program
+    ]
+    return Instruction(_pk(PUMP_AMM), COLLECT_COIN_CREATOR_FEE, accounts)

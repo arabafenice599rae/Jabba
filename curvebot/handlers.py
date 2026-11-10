@@ -492,7 +492,7 @@ async def cmd_reconcile(message: Message, cfg, conn, chain):
     if _uid(message) != cfg.allowed_ids[0]:
         await message.answer("Solo l'amministratore.")
         return
-    transfers = await chain.incoming_sol_transfers(max_signatures=50)
+    transfers = await chain.incoming_sol_transfers(max_pages=1, page_limit=50)
     onchain = {f"{t['signature']}:{t['index']}": t["amount_sol"]
                for t in transfers}
     result = service.reconcile(conn, onchain)
@@ -521,4 +521,44 @@ async def cmd_reconcile(message: Message, cfg, conn, chain):
     lines.append("")
     lines.append("✅ Nessuna discrepanza." if clean else
                  "⚠️ Discrepanze sopra: correzione SOLO manuale.")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("sweep"))
+async def cmd_sweep(message: Message, cfg, conn, chain):
+    """Admin: sweep the creator fees (0.30% of post-launch volume) from
+    both vaults — bonding curve (pre-graduation) and PumpSwap (after)."""
+    if message.from_user is None or not _guard(cfg, message.from_user.id):
+        return
+    if message.from_user.id != cfg.allowed_ids[0]:
+        await message.answer("Solo l'amministratore.")
+        return
+    mint = db.get_meta(conn, "mint")
+    if not mint or db.get_meta(conn, "state") not in ("launched", "launch_unknown"):
+        await message.answer("Nessun lancio registrato: niente da riscuotere.")
+        return
+    from .pump_ix import collect_coin_creator_fee_ix, collect_creator_fee_v2_ix, creator_vault
+
+    creator = chain.pubkey
+    vault = creator_vault(creator)
+    curve_lamports = await chain.account_lamports(str(vault))
+    lines = ["🧹 <b>Creator fee sweep</b>", ""]
+    lines.append(f"Vault curva: <code>{curve_lamports / 1e9:.6f} SOL</code>")
+
+    results = []
+    try:
+        sig = await chain.send_instructions([collect_creator_fee_v2_ix(creator)])
+        results.append(f"✅ curva: {sig[:24]}…")
+    except Exception as e:  # noqa: BLE001 — report any RPC failure to admin
+        results.append(f"❌ curva: {str(e)[:80]}")
+    try:
+        sig = await chain.send_instructions([collect_coin_creator_fee_ix(creator)])
+        results.append(f"✅ pumpswap: {sig[:24]}…")
+    except Exception as e:  # noqa: BLE001 — expected pre-graduation
+        # expected if the coin has not graduated (no AMM vault yet)
+        results.append(f"ℹ️ pumpswap: non riscosso ({str(e)[:60]}…)")
+
+    lines += results
+    lines.append("")
+    lines.append("Le fee riscosse arrivano direttamente nel treasury.")
     await message.answer("\n".join(lines))
