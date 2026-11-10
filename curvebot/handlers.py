@@ -492,7 +492,7 @@ async def cmd_reconcile(message: Message, cfg, conn, chain):
     if _uid(message) != cfg.allowed_ids[0]:
         await message.answer("Solo l'amministratore.")
         return
-    transfers = await chain.incoming_sol_transfers(max_signatures=50)
+    transfers = await chain.incoming_sol_transfers(max_pages=1, page_limit=50)
     onchain = {f"{t['signature']}:{t['index']}": t["amount_sol"]
                for t in transfers}
     result = service.reconcile(conn, onchain)

@@ -28,6 +28,7 @@ launch is REJECTED, not silently chained.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from fractions import Fraction
@@ -333,6 +334,14 @@ async def resolve_unknown_launch(chain, conn, now: float | None = None) -> str:
     resp = await chain.client.get_account_info(Pubkey.from_string(mint),
                                                commitment=Finalized)
     if resp.value is not None:
+        # same bookkeeping as the normal path: /sweep and /launch read `mint`
+        bundle_id = db.get_meta(conn, "pending_bundle") or ""
+        rep = json.loads(db.get_meta(conn, "pending_report") or "{}")
+        if rep:
+            db.record_launch(conn, mint, bundle_id, bundle_id, rep["dev_buy_sol"],
+                             rep["tokens_bought"], rep["distributed"],
+                             rep["team_tokens"])
+        db.set_meta(conn, "mint", mint)
         db.set_meta(conn, "state", "launched")
         return "landed"
     age = (now or time.time()) - int(db.get_meta(conn, "pending_at") or 0)
@@ -408,6 +417,11 @@ async def _run_launch_locked(chain, cfg, conn, http: aiohttp.ClientSession) -> d
         db.set_meta(conn, "pending_mint", mint)
         db.set_meta(conn, "pending_bundle", bundle_id)
         db.set_meta(conn, "pending_at", str(int(time.time())))
+        db.set_meta(conn, "pending_report", json.dumps({
+            "dev_buy_sol": dev_buy_sol,
+            "tokens_bought": expected / 10 ** DECIMALS,
+            "distributed": sum(b for _, b in recipients) / 10 ** DECIMALS,
+            "team_tokens": team / 10 ** DECIMALS}))
         raise LaunchOutcomeUnknown(
             f"esito bundle SCONOSCIUTO ({bundle_id}): verificare "
             f"manualmente su Solscan PRIMA di riprovare (mai retry "
