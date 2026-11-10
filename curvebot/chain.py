@@ -94,14 +94,15 @@ class Chain:
 
     # --- deposits & refunds seen on chain ---
 
-    async def incoming_sol_transfers(self, max_pages: int = 10,
-                                     is_seen=None) -> list[dict]:
+    async def incoming_sol_transfers(self, max_pages: int = 10, is_seen=None,
+                                     page_limit: int | None = None) -> list[dict]:
         """See scan_incoming(); returns only the transfers."""
-        transfers, _ = await self.scan_incoming(max_pages, is_seen)
+        transfers, _ = await self.scan_incoming(max_pages, is_seen, page_limit)
         return transfers
 
-    async def scan_incoming(self, max_pages: int = 10,
-                            is_seen=None) -> tuple[list[dict], list[str]]:
+    async def scan_incoming(self, max_pages: int = 10, is_seen=None,
+                            page_limit: int | None = None
+                            ) -> tuple[list[dict], list[str]]:
         """FINALIZED SOL transfers TO the treasury, one entry per transfer
         (a tx may carry several): dicts with signature, index, slot, sender,
         amount_sol; plus the signatures fully examined (to mark as seen).
@@ -109,8 +110,11 @@ class Chain:
         Walks the signature history back page by page. `is_seen(signature)`
         lets the caller skip transactions it has already processed: their
         get_transaction is not repeated, and paging stops at the first page
-        made only of seen signatures (history is newest-first)."""
+        made only of seen signatures (history is newest-first).
+        `page_limit` caps the signatures per page (RPC default: 1000)."""
         from solana.rpc.core import Finalized
+
+        page_kw = {"limit": page_limit} if page_limit else {}
 
         sigs: list = []
         seen_here: set[str] = set()
@@ -118,7 +122,7 @@ class Chain:
         for _ in range(max_pages):
             page = (await self.client.get_signatures_for_address(
                 self.keypair.pubkey(), before=before, commitment=Finalized,
-            )).value or []
+                **page_kw)).value or []
             new = [s for s in page if str(s.signature) not in seen_here]
             if not new:
                 break

@@ -106,6 +106,12 @@ async def resolve_unknown_refunds(conn, chain, grace_seconds: int = 600
     grace period, release the reservation. Returns resolution log."""
     resolutions = []
     unknowns = db.list_unknown_refunds(conn)
+    # a transfer already booked as a refund can never settle another one:
+    # matching by amount alone would pair an unknown refund with an older
+    # refund of the same size and book a payment that never happened
+    used = {r["signature"] for r in conn.execute(
+        "SELECT signature FROM ledger WHERE kind = 'refund' "
+        "AND signature IS NOT NULL")}
     for pending in unknowns:
         wallet = db.get_wallet(conn, pending["telegram_id"])
         net = pending["amount_sol"] - pending["fee_sol"]
@@ -113,9 +119,11 @@ async def resolve_unknown_refunds(conn, chain, grace_seconds: int = 600
         if wallet:
             transfers = await chain.transfers_to_wallet(wallet)
             matches = [t for t in transfers
-                       if abs(t["amount_sol"] - net) < 1e-9]
+                       if abs(t["amount_sol"] - net) < 1e-9
+                       and t["signature"] not in used]
             if matches:
                 landed = matches[0]
+                used.add(landed["signature"])
         if landed is not None:
             db.record(conn, pending["telegram_id"], "refund",
                       pending["amount_sol"], pending["fee_sol"],
