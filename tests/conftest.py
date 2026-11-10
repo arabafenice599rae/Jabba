@@ -40,11 +40,11 @@ def cfg():
     return SimpleNamespace(
         allowed_ids=[ADMIN, *USERS, *range(2000, 2100)],
         refund_fee_bps=30, team_keep_percent=10.0, team_share_bps=0,
-        safety_bps=10, min_deposit_sol=0.01, poll_interval_s=0,
+        safety_bps=0, min_deposit_sol=0.01, poll_interval_s=0,
         token_name="Jabba", token_symbol="JABBA", token_description="",
         token_image_path="x.png", pinata_jwt="jwt", token_twitter="",
-        token_telegram="", token_website="", launch_slippage=10,
-        launch_priority_fee=0.0005, jito_tip_lamports=1_000_000,
+        token_telegram="", token_website="", min_dev_buy_percent=50.0,
+        jito_tip_lamports=1_000_000,
     )
 
 

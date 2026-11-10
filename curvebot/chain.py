@@ -46,19 +46,6 @@ def is_valid_wallet(s: str) -> bool:
         return False
 
 
-def token_program_of_create_tx(raw: bytes) -> str:
-    """Token program the PumpPortal create tx will mint under, read from its
-    static account keys (pump.fun create_v2 -> Token-2022)."""
-    from solders.transaction import VersionedTransaction
-
-    keys = {str(k) for k in VersionedTransaction.from_bytes(raw).message.account_keys}
-    if TOKEN_2022_PROGRAM in keys:
-        return TOKEN_2022_PROGRAM
-    if TOKEN_PROGRAM in keys:
-        return TOKEN_PROGRAM
-    raise RuntimeError("tx di creazione senza token program riconoscibile")
-
-
 class Chain:
     def __init__(self, rpc_url: str, keypair_path: str):
         from solana.rpc.async_api import AsyncClient
@@ -229,14 +216,16 @@ class Chain:
 
     # --- launch support (pump.fun) ---
 
-    def sign_versioned(self, raw: bytes, extra_signers=None) -> bytes:
-        """Sign an unsigned PumpPortal transaction (raw bytes, as returned by
-        /api/trade-local); returns the signed wire bytes."""
-        from solders.transaction import VersionedTransaction
+    def build_create_tx(self, mint_kp, name: str, symbol: str, uri: str,
+                        amount: int, max_sol_cost: int) -> bytes:
+        """create_v2 + treasury ATA + buy_v3 of EXACTLY `amount` base units,
+        signed by the treasury (payer, creator, buyer) and the mint keypair.
+        Built directly on the pump.fun program (see pump_ix.py)."""
+        from .pump_ix import create_and_buy_ixs
 
-        txn = VersionedTransaction.from_bytes(raw)
-        signers = [self.keypair, *(extra_signers or [])]
-        return bytes(VersionedTransaction(txn.message, signers))
+        ixs = create_and_buy_ixs(mint_kp.pubkey(), self.keypair.pubkey(),
+                                 name, symbol, uri, amount, max_sol_cost)
+        return bytes(self._sign(ixs, extra_signers=[mint_kp]))
 
     def build_distribution_tx(self, mint: str,
                               recipients: list[tuple[str, int]],
